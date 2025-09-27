@@ -10,11 +10,11 @@ from services.s3store import s3_enabled, upload_bytes, presigned_url
 
 ASSETS = Path(__file__).parent / "assets"
 HEADER_LOGO = ASSETS / "SSAM_Logo.png"
-FAVICON = HEADER_LOGO / "favicon.png"
+FAVICON = HEADER_LOGO / "favicon.png
 
 st.set_page_config(
     page_title="Sponsorship Sales & Activation Machine",
-    page_icon=str(FAVICON) if FAVICON.exists() else "🏟️",
+    page_icon=str(FAVICON) if FAVICON.exists()
     layout="wide",
 )
 
