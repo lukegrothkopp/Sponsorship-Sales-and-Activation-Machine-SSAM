@@ -8,8 +8,8 @@ from services.reasoning import propose_for_prospect, TEAM_ASSETS
 from services.storage import build_contract_store
 from services.s3store import s3_enabled, upload_bytes, presigned_url
 
-st.set_page_config(page_title="Sports Sponsorship AI (Starter)", layout="wide")
-st.title("🏟️ Sports Sponsorship AI — Starter (S3 + Pinecone/Qdrant)")
+st.set_page_config(page_title="Sponsorship Sales & Activation Machine", layout="wide")
+st.title("🏟️ Sponsorship Sales & Activation Machine")
 
 load_dotenv()
 if st.secrets.get("OPENAI_API_KEY"):
