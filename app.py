@@ -24,7 +24,7 @@ with left:
     if HEADER_LOGO.exists():
         st.image(str(HEADER_LOGO), width=164)  # tweak width to fit
 with right:
-    st.title("SSAM — Sponsorship Sales & Activation Machine")
+    st.title("Sponsorship Sales & Activation Machine")
 
 load_dotenv()
 if st.secrets.get("OPENAI_API_KEY"):
