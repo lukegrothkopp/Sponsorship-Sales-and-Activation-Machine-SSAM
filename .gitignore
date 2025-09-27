@@ -1,0 +1,15 @@
+.env
+*.env
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.cache/
+.DS_Store
+.vscode/
+.chroma/
+uploads/
+contracts/
+pop_media/
