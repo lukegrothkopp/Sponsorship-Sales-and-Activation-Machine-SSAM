@@ -19,10 +19,10 @@ st.set_page_config(
 )
 
 # --- Header (logo + title) ---
-left, right = st.columns([0.12, 0.88])
+left, right = st.columns([0.22, 0.88])
 with left:
     if HEADER_LOGO.exists():
-        st.image(str(HEADER_LOGO), width=124)  # tweak width to fit
+        st.image(str(HEADER_LOGO), width=154)  # tweak width to fit
 with right:
     st.title("Sponsorship Sales & Activation Machine")
 
