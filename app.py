@@ -9,12 +9,12 @@ from services.storage import build_contract_store
 from services.s3store import s3_enabled, upload_bytes, presigned_url
 
 ASSETS = Path(__file__).parent / "assets"
-HEADER_LOGO = ASSETS / "SSAM_Logo.png"
-FAVICON = HEADER_LOGO / "favicon.png
+FAVICON = ASSETS / "favicon.png"       # tab icon
+HEADER_LOGO = ASSETS / "SSAM_Logo.png"  # page header logo
 
 st.set_page_config(
     page_title="Sponsorship Sales & Activation Machine",
-    page_icon=str(FAVICON) if FAVICON.exists()
+    page_icon=str(FAVICON) if FAVICON.exists() else "🤖",
     layout="wide",
 )
 
