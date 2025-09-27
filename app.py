@@ -10,7 +10,7 @@ from services.s3store import s3_enabled, upload_bytes, presigned_url
 
 ASSETS = Path(__file__).parent / "assets"
 HEADER_LOGO = ASSETS / "SSAM_Logo.png"
-FAVICON = HEADER_LOGO / "SSAM_Logo.png"
+FAVICON = HEADER_LOGO / "favicon.png"
 
 st.set_page_config(
     page_title="SSAM — Sponsorship Sales & Activation",
