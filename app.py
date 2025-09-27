@@ -13,7 +13,7 @@ HEADER_LOGO = ASSETS / "SSAM_Logo.png"
 FAVICON = HEADER_LOGO / "favicon.png"
 
 st.set_page_config(
-    page_title="SSAM — Sponsorship Sales & Activation Machine",
+    page_title="Sponsorship Sales & Activation Machine",
     page_icon=str(FAVICON) if FAVICON.exists() else "🏟️",
     layout="wide",
 )
