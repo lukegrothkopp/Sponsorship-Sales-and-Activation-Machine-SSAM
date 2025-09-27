@@ -25,7 +25,6 @@ with left:
         st.image(str(HEADER_LOGO), width=126)  # tweak width to fit
 with right:
     st.title("SSAM — Sponsorship Sales & Activation Machine")
-    st.caption("Prospecting → Pitch intelligence → Activation Management → Contracts Q&A → Partner dashboards")
 
 load_dotenv()
 if st.secrets.get("OPENAI_API_KEY"):
