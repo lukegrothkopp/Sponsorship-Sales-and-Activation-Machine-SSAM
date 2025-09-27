@@ -22,7 +22,7 @@ st.set_page_config(
 left, right = st.columns([0.08, 0.88])
 with left:
     if HEADER_LOGO.exists():
-        st.image(str(HEADER_LOGO), width=154)  # tweak width to fit
+        st.image(str(HEADER_LOGO), width=176)  # tweak width to fit
 with right:
     st.title("Sponsorship Sales & Activation Machine")
 
