@@ -22,7 +22,7 @@ st.set_page_config(
 left, right = st.columns([0.12, 0.88])
 with left:
     if HEADER_LOGO.exists():
-        st.image(str(HEADER_LOGO), width=126)  # tweak width to fit
+        st.image(str(HEADER_LOGO), width=164)  # tweak width to fit
 with right:
     st.title("SSAM — Sponsorship Sales & Activation Machine")
 
