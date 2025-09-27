@@ -8,8 +8,24 @@ from services.reasoning import propose_for_prospect, TEAM_ASSETS
 from services.storage import build_contract_store
 from services.s3store import s3_enabled, upload_bytes, presigned_url
 
-st.set_page_config(page_title="Sponsorship Sales & Activation Machine", layout="wide")
-st.title("🏟️ Sponsorship Sales & Activation Machine")
+ASSETS = Path(__file__).parent / "assets"
+HEADER_LOGO = ASSETS / "SSAM_Logo.png"
+FAVICON = HEADER_LOGO / "SSAM_Logo.png"
+
+st.set_page_config(
+    page_title="SSAM — Sponsorship Sales & Activation",
+    page_icon=str(FAVICON) if FAVICON.exists() else "🏟️",
+    layout="wide",
+)
+
+# --- Header (logo + title) ---
+left, right = st.columns([0.12, 0.88])
+with left:
+    if HEADER_LOGO.exists():
+        st.image(str(HEADER_LOGO), width=64)  # tweak width to fit
+with right:
+    st.title("SSAM — Sponsorship Sales & Activation")
+    st.caption("Prospecting → Pitch intelligence → Activation logging → Contracts Q&A → Partner dashboards")
 
 load_dotenv()
 if st.secrets.get("OPENAI_API_KEY"):
