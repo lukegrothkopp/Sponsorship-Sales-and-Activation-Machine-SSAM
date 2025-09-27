@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 # --- Header (logo + title) ---
-left, right = st.columns([0.22, 0.88])
+left, right = st.columns([0.08, 0.88])
 with left:
     if HEADER_LOGO.exists():
         st.image(str(HEADER_LOGO), width=154)  # tweak width to fit
