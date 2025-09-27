@@ -13,7 +13,7 @@ HEADER_LOGO = ASSETS / "SSAM_Logo.png"
 FAVICON = HEADER_LOGO / "favicon.png"
 
 st.set_page_config(
-    page_title="SSAM — Sponsorship Sales & Activation",
+    page_title="SSAM — Sponsorship Sales & Activation Machine",
     page_icon=str(FAVICON) if FAVICON.exists() else "🏟️",
     layout="wide",
 )
@@ -22,16 +22,16 @@ st.set_page_config(
 left, right = st.columns([0.12, 0.88])
 with left:
     if HEADER_LOGO.exists():
-        st.image(str(HEADER_LOGO), width=64)  # tweak width to fit
+        st.image(str(HEADER_LOGO), width=126)  # tweak width to fit
 with right:
-    st.title("SSAM — Sponsorship Sales & Activation")
-    st.caption("Prospecting → Pitch intelligence → Activation logging → Contracts Q&A → Partner dashboards")
+    st.title("SSAM — Sponsorship Sales & Activation Machine")
+    st.caption("Prospecting → Pitch intelligence → Activation Management → Contracts Q&A → Partner dashboards")
 
 load_dotenv()
 if st.secrets.get("OPENAI_API_KEY"):
     os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
-st.caption("Prospecting → Pitch intelligence → Activation logging → Contracts Q&A → Partner dashboards")
+st.caption("Prospecting → Pitch intelligence → Activation Management → Contracts Q&A → Partner dashboards")
 
 with st.sidebar:
     st.subheader("🔧 Settings")
