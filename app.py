@@ -57,32 +57,48 @@ def _me():
     }
 
 # ------------------------
-# Query params helpers (modern API)
+# Query params helpers (modern API, dict-like)
 # ------------------------
-# st.query_params behaves like a dict[str, str]
+# st.query_params behaves like a mutable dict[str, str]
 
-def set_route(page=None, scope=None, partner=None, section=None, overwrite=False):
-    # Start from current params
-    params = dict(st.query_params) if not overwrite else {}
-    if page is not None:    params["page"] = page
-    if scope is not None:   params["scope"] = scope
-    if partner is not None: params["partner"] = partner
-    if section is not None: params["section"] = section
+def set_route(page=None, scope=None, partner=None, section=None, replace=False):
+    qp = st.query_params  # dict-like proxy
 
-    # Write back (overwrite=True ensures removed keys are dropped)
-    st.query_params.from_dict(params, overwrite=True)
+    # Optionally clear everything first
+    if replace:
+        for k in list(qp.keys()):
+            try:
+                del qp[k]
+            except KeyError:
+                pass
 
-    # Rerun to apply route
+    # Set / update keys
+    if page is not None:
+        qp["page"] = page
+    if scope is not None:
+        qp["scope"] = scope
+    if partner is not None:
+        # allow clearing partner by passing None or ""
+        if partner == "" or partner is None:
+            if "partner" in qp:
+                del qp["partner"]
+        else:
+            qp["partner"] = partner
+    if section is not None:
+        qp["section"] = section
+
+    # Apply route
     try:
         st.rerun()
     except Exception:
-        st.experimental_rerun()  # safe fallback for older Streamlit
+        st.experimental_rerun()  # safe fallback
 
 # Read current route (strings, not lists)
 current_page    = st.query_params.get("page", "Me")
 current_scope   = st.query_params.get("scope", "active")
 current_partner = st.query_params.get("partner", None)
 current_section = st.query_params.get("section", "overview")
+
 
 # ------------------------
 # Sidebar (navigation) — SINGLE source of truth
@@ -103,8 +119,8 @@ with st.sidebar:
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
 
     # Keep the URL shareable/reflecting current page
-    if sel != current_page:
-        set_route(page=sel)  # updates ?page=... and reruns
+        if sel != current_page:
+            set_route(page=sel)  # updates ?page=... and reruns
 
         names = [p["name"] for p in PARTNERS[current_scope]]
         ids   = [p["id"]   for p in PARTNERS[current_scope]]
