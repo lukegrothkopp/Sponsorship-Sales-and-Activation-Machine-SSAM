@@ -81,7 +81,7 @@ def set_route(page=None, scope=None, partner=None, section=None):
     except Exception:
         st.experimental_rerun()
 
-params = st.st.query_params()
+params = st.query_params()
 current_page   = params.get("page",   ["Me"])[0]
 current_scope  = params.get("scope",  ["active"])[0]
 current_partner= params.get("partner",[None])[0]
