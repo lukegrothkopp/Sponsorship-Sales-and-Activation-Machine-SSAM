@@ -70,18 +70,18 @@ def _me():
 # Query params helpers
 # ------------------------
 def set_route(page=None, scope=None, partner=None, section=None):
-    params = st.experimental_get_query_params()
+    params = st.query_params()
     if page is not None:   params["page"] = [page]
     if scope is not None:  params["scope"] = [scope]
     if partner is not None:params["partner"] = [partner]
     if section is not None:params["section"] = [section]
-    st.experimental_set_query_params(**params)
+    st.query_params(**params)
     try:
         st.rerun()
     except Exception:
         st.experimental_rerun()
 
-params = st.experimental_get_query_params()
+params = st.st.query_params()
 current_page   = params.get("page",   ["Me"])[0]
 current_scope  = params.get("scope",  ["active"])[0]
 current_partner= params.get("partner",[None])[0]
