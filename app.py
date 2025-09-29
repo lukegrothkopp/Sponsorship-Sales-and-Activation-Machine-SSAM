@@ -57,25 +57,32 @@ def _me():
     }
 
 # ------------------------
-# Query params helpers (use experimental_* which returns lists)
+# Query params helpers (modern API)
 # ------------------------
-def set_route(page=None, scope=None, partner=None, section=None):
-    params = st.experimental_get_query_params()
-    if page is not None:    params["page"]    = [page]
-    if scope is not None:   params["scope"]   = [scope]
-    if partner is not None: params["partner"] = [partner]
-    if section is not None: params["section"] = [section]
-    st.experimental_set_query_params(**params)
+# st.query_params behaves like a dict[str, str]
+
+def set_route(page=None, scope=None, partner=None, section=None, overwrite=False):
+    # Start from current params
+    params = dict(st.query_params) if not overwrite else {}
+    if page is not None:    params["page"] = page
+    if scope is not None:   params["scope"] = scope
+    if partner is not None: params["partner"] = partner
+    if section is not None: params["section"] = section
+
+    # Write back (overwrite=True ensures removed keys are dropped)
+    st.query_params.from_dict(params, overwrite=True)
+
+    # Rerun to apply route
     try:
         st.rerun()
     except Exception:
-        st.experimental_rerun()
+        st.experimental_rerun()  # safe fallback for older Streamlit
 
-params = st.experimental_get_query_params()
-current_page    = params.get("page",    ["Me"])[0]
-current_scope   = params.get("scope",   ["active"])[0]
-current_partner = params.get("partner", [None])[0]
-current_section = params.get("section", ["overview"])[0]
+# Read current route (strings, not lists)
+current_page    = st.query_params.get("page", "Me")
+current_scope   = st.query_params.get("scope", "active")
+current_partner = st.query_params.get("partner", None)
+current_section = st.query_params.get("section", "overview")
 
 # ------------------------
 # Sidebar (navigation) — SINGLE source of truth
@@ -95,10 +102,10 @@ with st.sidebar:
 
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
 
-    # Partnerships sidebar controls (scope + quick open)
-    if sel == "Partnerships":
-        current_scope = st.selectbox("Scope", ["active","prospective"],
-                                     index=0 if current_scope=="active" else 1, key="scope_select")
+    # Keep the URL shareable/reflecting current page
+    if sel != current_page:
+        set_route(page=sel)  # updates ?page=... and reruns
+
         names = [p["name"] for p in PARTNERS[current_scope]]
         ids   = [p["id"]   for p in PARTNERS[current_scope]]
         if names:
