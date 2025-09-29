@@ -120,7 +120,7 @@ with st.sidebar:
 
     # Keep the URL shareable/reflecting current page
         if sel != current_page:
-            set_route(page=sel)  # updates ?page=... and reruns
+        set_route(page=sel)  # updates ?page=... and reruns
 
         names = [p["name"] for p in PARTNERS[current_scope]]
         ids   = [p["id"]   for p in PARTNERS[current_scope]]
