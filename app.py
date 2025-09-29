@@ -119,7 +119,7 @@ with st.sidebar:
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
 
     # Keep the URL shareable/reflecting current page
-        if sel != current_page:
+    if sel != current_page:
         set_route(page=sel)  # updates ?page=... and reruns
 
         names = [p["name"] for p in PARTNERS[current_scope]]
