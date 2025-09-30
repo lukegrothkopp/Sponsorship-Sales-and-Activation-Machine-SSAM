@@ -1,20 +1,44 @@
+# app.py
 import os
+import json
+import io
 from pathlib import Path
 from datetime import datetime
-import io
+import uuid
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-# Optional: if you rely on these elsewhere in your project, keep imports.
-# If not, you can comment them out to avoid import errors while iterating.
-from services.providers import SponsorUnitedClient, DigiDeckClient, SalesforceClient, DynamicsClient, TableauClient
-from services.reasoning import propose_for_prospect, TEAM_ASSETS
-from services.storage import build_contract_store
-from services.s3store import s3_enabled, upload_bytes, presigned_url
+# Optional external services — safe to comment if not present
+try:
+    from services.providers import SponsorUnitedClient, DigiDeckClient, SalesforceClient, DynamicsClient, TableauClient  # noqa
+except Exception:
+    SponsorUnitedClient = DigiDeckClient = SalesforceClient = DynamicsClient = TableauClient = None  # stubs
+
+try:
+    from services.reasoning import propose_for_prospect, TEAM_ASSETS  # noqa
+except Exception:
+    def propose_for_prospect(_): return {"opener": "", "rationale": "", "matching_assets": [], "next_steps": []}
+    TEAM_ASSETS = ["LED ribbon", "Social post", "Player appearance"]
+
+try:
+    from services.storage import build_contract_store  # noqa
+except Exception:
+    def build_contract_store(*_, **__): return (None, 0, "chroma")
+
+try:
+    from services.s3store import s3_enabled, upload_bytes, presigned_url, download_bytes  # noqa
+except Exception:
+    def s3_enabled(): return False
+    def upload_bytes(*_, **__): return False
+    def presigned_url(*_, **__): return None
+    def download_bytes(*_, **__): return None
 
 load_dotenv()
 
+# ------------------------
+# App chrome
+# ------------------------
 ASSETS = Path(__file__).parent / "assets"
 FAVICON = ASSETS / "favicon.png"        # tab icon
 HEADER_LOGO = ASSETS / "SSAM_Logo.png"  # page header logo
@@ -25,13 +49,30 @@ st.set_page_config(
     layout="wide",
 )
 
+# Runtime theme toggle (simple CSS injection)
+def apply_theme():
+    theme = st.session_state.get("ui_theme", "dark")
+    if theme == "dark":
+        st.markdown("""
+        <style>
+        .stApp { background:#0E1117; color:#FAFAFA; }
+        section[data-testid="stSidebar"] { background:#161A23; }
+        div[role="tablist"] button[aria-selected="true"] { border-bottom:2px solid #E54D2E; }
+        .stButton>button{ background:#E54D2E; color:#0E1117; border:0; }
+        .stButton>button:hover{ filter:brightness(1.1); }
+        </style>
+        """, unsafe_allow_html=True)
+
+apply_theme()
+
 # ------------------------
-# Simple in-app directory
+# Constants & data model
 # ------------------------
 CURRENT_SEASON = datetime.now().year
+DATA_DIR = Path("data"); DATA_DIR.mkdir(exist_ok=True)
 
-# Catalog of assets per partner, organized by category (example data)
-PARTNER_ASSETS = {
+# Example asset catalogs per partner (can be replaced via upload)
+DEFAULT_ASSETS = {
     "coke": {
         "Digital Media": [
             {"name": "Social series (player Q&A video)", "season": CURRENT_SEASON},
@@ -61,17 +102,9 @@ PARTNER_ASSETS = {
         ],
     },
     "zippay": {
-        "Digital Media": [
-            {"name": "Season launch splash", "season": CURRENT_SEASON},
-        ],
-        "Signage": [
-            {"name": "Concourse sampling footprint", "season": CURRENT_SEASON},
-        ],
-        "Radio": [],
-        "Television": [],
-        "LED-Ribbon": [],
-        "IP-Use of Marks": [],
-        "Community Engagement": [],
+        "Digital Media": [{"name": "Season launch splash", "season": CURRENT_SEASON}],
+        "Signage": [{"name": "Concourse sampling footprint", "season": CURRENT_SEASON}],
+        "Radio": [], "Television": [], "LED-Ribbon": [], "IP-Use of Marks": [], "Community Engagement": [],
     },
 }
 
@@ -86,6 +119,12 @@ PARTNERS = {
     ],
 }
 
+# ------------------------
+# Helpers (routing, ids, storage)
+# ------------------------
+def slug(s: str) -> str:
+    return "".join(ch.lower() if ch.isalnum() else "-" for ch in s).strip("-")
+
 def _partner_by_id(pid):
     for scope in ("active", "prospective"):
         for p in PARTNERS[scope]:
@@ -93,59 +132,139 @@ def _partner_by_id(pid):
                 return p, scope
     return None, None
 
-def _me():
-    # Pull from secrets if provided, otherwise sensible defaults
+def my_profile():
     return {
         "name": st.secrets.get("USER_NAME", "Your Name"),
         "email": st.secrets.get("USER_EMAIL", "you@example.com"),
-        "role": st.secrets.get("USER_ROLE", "Account Exec"),
-        # Comma-separated partner ids in secrets (e.g., "coke,zippay")
+        "role": st.secrets.get("USER_ROLE", "AE"),  # AE, Brand, Agency
         "partner_ids": [s.strip() for s in st.secrets.get("USER_PARTNERS", "coke").split(",") if s.strip()],
         "photo": st.secrets.get("USER_PHOTO_URL", None),
     }
 
+def set_route(page=None, scope=None, partner=None, section=None, replace=False):
+    """Update query params; rerun only on real change (prevents loops)."""
+    qp = st.query_params
+    changed = False
+    if replace:
+        for k in list(qp.keys()): del qp[k]
+        changed = True
+    if page is not None and qp.get("page") != page: qp["page"] = page; changed = True
+    if scope is not None and qp.get("scope") != scope: qp["scope"] = scope; changed = True
+    if partner is not None:
+        if partner in ("", None):
+            if "partner" in qp: del qp["partner"]; changed = True
+        elif qp.get("partner") != partner: qp["partner"] = partner; changed = True
+    if section is not None and qp.get("section") != section: qp["section"] = section; changed = True
+    if changed: st.rerun()
+
+# Query state
+current_page    = st.query_params.get("page", "Me")
+current_scope   = st.query_params.get("scope", "active")
+current_partner = st.query_params.get("partner", None)
+current_section = st.query_params.get("section", "overview")
+
 # ------------------------
-# State helpers (tasks & selection)
+# Persistence: local JSON with optional S3
 # ------------------------
-def _ensure_partner_state(pid: str):
-    """Initialize session state buckets for a partner."""
+def _local_path(kind: str, pid: str) -> Path:
+    # kind: "tasks" or "assets"
+    return DATA_DIR / f"{kind}_{pid}.json"
+
+def _s3_key(kind: str, pid: str) -> str:
+    return f"ssam/{kind}/{pid}.json"
+
+def save_json(kind: str, pid: str, data: dict | list) -> None:
+    payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    # write local
+    _local_path(kind, pid).write_bytes(payload)
+    # optional S3
+    if s3_enabled():
+        upload_bytes(_s3_key(kind, pid), payload, content_type="application/json")
+
+def load_json(kind: str, pid: str, default):
+    # Try S3 first
+    if s3_enabled():
+        blob = download_bytes(_s3_key(kind, pid))
+        if blob:
+            try:
+                return json.loads(blob.decode("utf-8"))
+            except Exception:
+                pass
+    # Fallback local
+    lp = _local_path(kind, pid)
+    if lp.exists():
+        try:
+            return json.loads(lp.read_text(encoding="utf-8"))
+        except Exception:
+            return default
+    return default
+
+# ------------------------
+# Session state buckets
+# ------------------------
+def load_assets_for(pid: str):
+    if "assets" not in st.session_state:
+        st.session_state["assets"] = {}
+    if pid not in st.session_state["assets"]:
+        # load from storage or default
+        data = load_json("assets", pid, DEFAULT_ASSETS.get(pid, {}))
+        st.session_state["assets"][pid] = data
+
+def ensure_partner_state(pid: str):
     if "tasks" not in st.session_state:
         st.session_state["tasks"] = {}  # tasks[pid] = list of dicts
     if pid not in st.session_state["tasks"]:
-        st.session_state["tasks"][pid] = []
+        task_list = load_json("tasks", pid, [])
+        st.session_state["tasks"][pid] = task_list
 
     if "asset_sel" not in st.session_state:
-        st.session_state["asset_sel"] = {}  # asset_sel[pid][category][asset_name] = bool
+        st.session_state["asset_sel"] = {}
     if pid not in st.session_state["asset_sel"]:
+        load_assets_for(pid)
         st.session_state["asset_sel"][pid] = {}
-        # initialize all assets unchecked
-        for cat, items in PARTNER_ASSETS.get(pid, {}).items():
+        for cat, items in st.session_state["assets"][pid].items():
             st.session_state["asset_sel"][pid][cat] = {a["name"]: False for a in items}
 
-def _select_all_assets(pid: str, value: bool = True):
-    """Set all checkboxes True/False for displayed partner."""
-    _ensure_partner_state(pid)
-    for cat in st.session_state["asset_sel"][pid]:
-        for name in st.session_state["asset_sel"][pid][cat]:
-            st.session_state["asset_sel"][pid][cat][name] = value
+def save_tasks(pid: str):
+    save_json("tasks", pid, st.session_state["tasks"][pid])
 
-def _create_task(pid: str, asset: str, desc: str, specs: str, qty: int, classification: str):
-    """Append a new task for a partner."""
-    _ensure_partner_state(pid)
+def save_assets(pid: str):
+    save_json("assets", pid, st.session_state["assets"][pid])
+
+# Task operations
+def new_task(pid: str, asset: str, desc: str, specs: str, qty: int, classification: str, assignee: str | None):
+    ensure_partner_state(pid)
     st.session_state["tasks"][pid].append({
+        "id": str(uuid.uuid4()),
         "asset": asset,
         "description": desc,
         "specifications": specs,
-        "quantity": qty,
-        "type": classification,  # "contracted" or "value added"
+        "quantity": int(qty),
+        "type": classification,     # "contracted" or "value added"
+        "assignee": assignee or "",
+        "status": "open",           # open / complete
         "created": datetime.now().isoformat(timespec="seconds"),
     })
+    save_tasks(pid)
 
-def _export_assets_csv(pid: str) -> bytes:
-    """Export current assets (with selection status) to CSV."""
-    _ensure_partner_state(pid)
+def update_task(pid: str, task_id: str, **fields):
+    ensure_partner_state(pid)
+    for t in st.session_state["tasks"][pid]:
+        if t["id"] == task_id:
+            t.update({k: v for k, v in fields.items() if v is not None})
+            break
+    save_tasks(pid)
+
+def delete_tasks(pid: str, ids: list[str]):
+    ensure_partner_state(pid)
+    st.session_state["tasks"][pid] = [t for t in st.session_state["tasks"][pid] if t["id"] not in ids]
+    save_tasks(pid)
+
+# Export helpers
+def export_assets_csv(pid: str) -> bytes:
+    load_assets_for(pid); ensure_partner_state(pid)
     rows = []
-    cats = PARTNER_ASSETS.get(pid, {})
+    cats = st.session_state["assets"][pid]
     sel = st.session_state["asset_sel"][pid]
     for cat, items in cats.items():
         for a in items:
@@ -159,73 +278,45 @@ def _export_assets_csv(pid: str) -> bytes:
     df = pd.DataFrame(rows)
     return df.to_csv(index=False).encode("utf-8")
 
-# ------------------------
-# Query params helpers (modern API, dict-like)
-# ------------------------
-def set_route(page=None, scope=None, partner=None, section=None, replace=False):
-    """Update query params; rerun only if something actually changed."""
-    qp = st.query_params  # dict-like proxy
-    changed = False
-
-    if replace:
-        for k in list(qp.keys()):
-            del qp[k]
-        changed = True
-
-    if page is not None and qp.get("page") != page:
-        qp["page"] = page; changed = True
-    if scope is not None and qp.get("scope") != scope:
-        qp["scope"] = scope; changed = True
-    if partner is not None:
-        if partner in ("", None):
-            if "partner" in qp:
-                del qp["partner"]; changed = True
-        elif qp.get("partner") != partner:
-            qp["partner"] = partner; changed = True
-    if section is not None and qp.get("section") != section:
-        qp["section"] = section; changed = True
-
-    if changed:
-        st.rerun()
-
-# Read current route (strings, not lists)
-current_page    = st.query_params.get("page", "Me")
-current_scope   = st.query_params.get("scope", "active")
-current_partner = st.query_params.get("partner", None)
-current_section = st.query_params.get("section", "overview")
+def export_tasks_xlsx(pid: str) -> bytes | None:
+    try:
+        import openpyxl  # noqa
+    except Exception:
+        return None
+    ensure_partner_state(pid)
+    df = pd.DataFrame(st.session_state["tasks"][pid])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        df.to_excel(xw, index=False, sheet_name="Tasks")
+    buf.seek(0)
+    return buf.getvalue()
 
 # ------------------------
-# Sidebar (navigation) — SINGLE source of truth
+# Sidebar (navigation)
 # ------------------------
 with st.sidebar:
     if HEADER_LOGO.exists():
         st.image(str(HEADER_LOGO), width=96)
 
-    PAGES = [
-        "Me","Partnerships","Prospecting","Selling","Reports",
-        "Users","Presentations","Files","Contracts","Data","Settings"
-    ]
+    # Theme toggle
+    st.selectbox("Theme", ["dark", "light"], index=0 if st.session_state.get("ui_theme","dark")=="dark" else 1,
+                 key="ui_theme", on_change=apply_theme)
+
+    PAGES = ["Me","Partnerships","Prospecting","Selling","Reports",
+             "Users","Presentations","Files","Contracts","Data","Settings"]
+
     try:
         start_idx = PAGES.index(current_page)
     except ValueError:
         start_idx = 0
 
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
+    if sel != current_page: set_route(page=sel)
 
-    # Keep the URL shareable/reflecting current page
-    if sel != current_page:
-        set_route(page=sel)
-
-    # Partnerships controls (dedented; not under the set_route branch)
     if sel == "Partnerships":
-        # scope switcher
-        current_scope = st.selectbox(
-            "Scope", ["active","prospective"],
-            index=0 if current_scope=="active" else 1,
-            key="scope_select"
-        )
+        current_scope = st.selectbox("Scope", ["active","prospective"],
+                                     index=0 if current_scope=="active" else 1, key="scope_select")
 
-        # brand chooser
         names = [p["name"] for p in PARTNERS[current_scope]]
         ids   = [p["id"]   for p in PARTNERS[current_scope]]
         if names:
@@ -234,39 +325,41 @@ with st.sidebar:
             if st.button("Open ▶"):
                 set_route(page="Partnerships", scope=current_scope, partner=pid, section="overview")
 
-        # Secondary, indented child link for the currently-open brand
         if current_partner:
             p, _ = _partner_by_id(current_partner)
             if p:
-                st.markdown(
-                    f"<div style='margin-left:10px; color:#bbb;'>↳ <b>{p['name']}</b></div>",
-                    unsafe_allow_html=True
-                )
-                # Optional quick navigation between brand sections (doesn't auto-rerun)
+                st.markdown(f"<div style='margin-left:10px; color:#bbb;'>↳ <b>{p['name']}</b></div>", unsafe_allow_html=True)
                 sections = ["overview","tasks","files","calendar","social","presentations","data"]
-                try:
-                    sec_idx = sections.index(current_section)
-                except ValueError:
-                    sec_idx = 0
-                sub = st.selectbox("Navigate brand sections", sections, index=sec_idx, key="brand_section_select")
+                try: sec_idx = sections.index(current_section)
+                except ValueError: sec_idx = 0
+                sub = st.selectbox("Brand section", sections, index=sec_idx, key="brand_section_select")
                 if st.button("Go"):
                     set_route(page="Partnerships", scope=current_scope, partner=current_partner, section=sub)
 
-# Overwrite route with sidebar choice if user changed it
 current_page = sel
 
 # ------------------------
-# Page renderers
+# UI bits
+# ------------------------
+def breadcrumb(*parts):
+    st.caption(" › ".join(parts))
+
+def toast(msg, kind="info"):
+    if hasattr(st, "toast"):
+        st.toast(msg)
+    else:
+        (st.success if kind=="success" else st.info)(msg)
+
+# ------------------------
+# Pages
 # ------------------------
 def render_me():
-    u = _me()
+    u = my_profile()
     st.subheader("My Profile")
     col1, col2 = st.columns([0.18, 0.82])
     with col1:
-        if u["photo"]:
-            st.image(u["photo"])
-        else:
-            st.image("https://placehold.co/200x200?text=ME")
+        if u["photo"]: st.image(u["photo"])
+        else:          st.image("https://placehold.co/200x200?text=ME")
     with col2:
         st.write(f"**Name:** {u['name']}")
         st.write(f"**Email:** {u['email']}")
@@ -274,163 +367,284 @@ def render_me():
 
     st.markdown("---")
     st.subheader("My Partners")
-    has_link = False
+    any_btn = False
     for pid in u["partner_ids"]:
         p, scope = _partner_by_id(pid)
-        if not p:
-            continue
-        has_link = True
+        if not p: continue
+        any_btn = True
         if st.button(f"Open {p['name']} ▶", key=f"me_open_{pid}"):
             set_route(page="Partnerships", scope=scope or "active", partner=pid, section="overview")
-    if not has_link:
-        st.info("No partners assigned yet.")
+    if not any_btn: st.info("No partners assigned yet.")
+
+    # My Tasks (aggregated)
+    st.markdown("---")
+    st.subheader("My Tasks")
+    my_ids = []
+    for scope in PARTNERS:
+        for p in PARTNERS[scope]:
+            pid = p["id"]; ensure_partner_state(pid)
+            for t in st.session_state["tasks"][pid]:
+                if t.get("assignee","").lower() == u["email"].lower():
+                    my_ids.append((pid, p["name"], t))
+    if not my_ids:
+        st.caption("No tasks assigned to you yet.")
+    else:
+        rows = [{"partner": name, **t} for (_, name, t) in my_ids]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+def _brand_tabs(pid: str, partner_name: str, scope: str):
+    """The brand page with tabs and full Tasks UX."""
+    load_assets_for(pid)
+    ensure_partner_state(pid)
+
+    st.subheader(f"{partner_name} — {scope.title()} Partnership")
+    breadcrumb("Partnerships", partner_name, current_section.title())
+
+    tabs = st.tabs(["overview","tasks","files","calendar","social","presentations","data"])
+    # OVERVIEW
+    with tabs[0]:
+        st.markdown("**Assets in contract (by category)**")
+        cats = st.session_state["assets"][pid]
+        if cats:
+            for cat, items in cats.items():
+                with st.expander(cat, expanded=False):
+                    for a in items:
+                        st.write(f"• {a['name']}  ·  Season {a.get('season', CURRENT_SEASON)}")
+        else:
+            st.caption("No assets listed yet.")
+        if st.button("← Back to all partnerships"):
+            set_route(page="Partnerships", scope=scope, partner=None, section=None)
+
+    # TASKS
+    with tabs[1]:
+        st.markdown("### Tasks")
+
+        # Top actions
+        c1, c2, c3, c4 = st.columns([1,1,1,1])
+        with c1:
+            create_clicked = st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}")
+        with c2:
+            export_csv_clicked = st.button("Export Assets (CSV)", use_container_width=True, key=f"expassets_{pid}")
+        with c3:
+            export_xlsx_clicked = st.button("Export Tasks (Excel)", use_container_width=True, key=f"exptasks_{pid}")
+        with c4:
+            select_all_clicked = st.button("Select All Assets", use_container_width=True, key=f"selall_{pid}")
+
+        role = my_profile()["role"].lower()
+        can_edit = role in ("ae", "admin")
+
+        # Bulk select assets
+        if select_all_clicked:
+            for cat in st.session_state["asset_sel"][pid]:
+                for name in st.session_state["asset_sel"][pid][cat]:
+                    st.session_state["asset_sel"][pid][cat][name] = True
+            toast("All assets selected.", "success")
+
+        # Export assets CSV
+        if export_csv_clicked:
+            csv_bytes = export_assets_csv(pid)
+            st.download_button("Download CSV",
+                               data=csv_bytes,
+                               file_name=f"{partner_name}_assets_{CURRENT_SEASON}.csv",
+                               mime="text/csv",
+                               key=f"dl_assets_{pid}")
+
+        # Export tasks Excel (if available)
+        if export_xlsx_clicked:
+            xbytes = export_tasks_xlsx(pid)
+            if xbytes:
+                st.download_button("Download Tasks.xlsx",
+                                   data=xbytes,
+                                   file_name=f"{partner_name}_tasks.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"dl_tasks_{pid}")
+            else:
+                st.warning("Excel export requires `openpyxl`. Falling back to CSV below.")
+                df = pd.DataFrame(st.session_state["tasks"][pid])
+                st.download_button("Download Tasks.csv",
+                                   data=df.to_csv(index=False).encode("utf-8"),
+                                   file_name=f"{partner_name}_tasks.csv",
+                                   mime="text/csv",
+                                   key=f"dl_tasks_csv_{pid}")
+
+        # Create New Task
+        if create_clicked and can_edit:
+            st.session_state["show_new_task_modal"] = True
+
+        if st.session_state.get("show_new_task_modal", False) and can_edit:
+            cats = st.session_state["assets"][pid]
+            all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
+
+            def task_form(form_key: str):
+                asset_pick = st.selectbox("Asset", all_assets, key=f"{form_key}_asset")
+                desc  = st.text_area("Task description", key=f"{form_key}_desc")
+                specs = st.text_area("Specifications / production notes", key=f"{form_key}_specs")
+                qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key=f"{form_key}_qty")
+                classification = st.selectbox("Type", ["contracted","value added"], key=f"{form_key}_type")
+                assignee = st.text_input("Assign to (email)", key=f"{form_key}_assignee")
+                submitted = st.form_submit_button("Save Task")
+                return submitted, asset_pick, desc, specs, qty, classification, assignee
+
+            if hasattr(st, "experimental_dialog"):
+                @st.experimental_dialog("Create New Task")
+                def _new_task_dialog():
+                    with st.form("new_task_form"):
+                        submitted, asset_pick, desc, specs, qty, classification, assignee = task_form("nt")
+                    if submitted:
+                        asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                        new_task(pid, asset_name, desc, specs, qty, classification, assignee)
+                        st.session_state["show_new_task_modal"] = False
+                        toast("Task created.", "success")
+                        st.rerun()
+                _new_task_dialog()
+            else:
+                with st.expander("Create New Task", expanded=True):
+                    with st.form("new_task_form_inline"):
+                        submitted, asset_pick, desc, specs, qty, classification, assignee = task_form("nt2")
+                    if submitted:
+                        asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                        new_task(pid, asset_name, desc, specs, qty, classification, assignee)
+                        st.session_state["show_new_task_modal"] = False
+                        toast("Task created.", "success")
+                        st.experimental_rerun()
+
+        # Filters
+        st.markdown("#### Filters")
+        cats = st.session_state["assets"][pid]
+        all_categories = list(cats.keys())
+        fcol1, fcol2, fcol3 = st.columns([1,1,1])
+        with fcol1:
+            pick_cats = st.multiselect("Category", all_categories, default=all_categories, key=f"fcat_{pid}")
+        with fcol2:
+            pick_types = st.multiselect("Type", ["contracted","value added"], default=["contracted","value added"],
+                                        key=f"ftype_{pid}")
+        with fcol3:
+            seasons = sorted({a.get("season", CURRENT_SEASON) for items in cats.values() for a in items})
+            pick_season = st.selectbox("Season", seasons, index=len(seasons)-1, key=f"fseason_{pid}")
+
+        # Tasks list with selection + per-row actions
+        st.markdown("#### Task List")
+        tasks = [t for t in st.session_state["tasks"][pid]
+                 if t["type"] in pick_types]
+        # Per-row selection
+        sel_ids = []
+        for t in tasks:
+            row = st.container(border=True)
+            with row:
+                csel, cinfo, cbtns = st.columns([0.1, 0.7, 0.2])
+                with csel:
+                    checked = st.checkbox("", key=f"taskchk_{pid}_{t['id']}")
+                    if checked: sel_ids.append(t["id"])
+                with cinfo:
+                    st.markdown(f"**{t['asset']}** · _{t['type']}_ · **Qty:** {t['quantity']} · **Assignee:** {t.get('assignee','') or '—'}")
+                    st.caption(t.get("description",""))
+                    st.caption(f"Specs: {t.get('specifications','')}")
+                    st.caption(f"Status: {t.get('status','open')} · Created: {t.get('created','')}")
+                with cbtns:
+                    if can_edit and st.button("Edit", key=f"edit_{pid}_{t['id']}"):
+                        st.session_state["edit_task_id"] = t["id"]
+                    if can_edit and st.button("Delete", key=f"del_{pid}_{t['id']}"):
+                        delete_tasks(pid, [t["id"]]); toast("Task deleted.", "success"); st.rerun()
+
+        # Edit dialog for one task
+        edit_id = st.session_state.get("edit_task_id")
+        if can_edit and edit_id:
+            ed_task = next((x for x in st.session_state["tasks"][pid] if x["id"] == edit_id), None)
+            if ed_task:
+                def edit_form(prefix="et"):
+                    new_desc  = st.text_area("Task description", value=ed_task.get("description",""), key=f"{prefix}_desc")
+                    new_specs = st.text_area("Specifications / production notes", value=ed_task.get("specifications",""), key=f"{prefix}_specs")
+                    new_qty   = st.number_input("Quantity", min_value=1, step=1, value=int(ed_task.get("quantity",1)), key=f"{prefix}_qty")
+                    new_type  = st.selectbox("Type", ["contracted","value added"], index=0 if ed_task.get("type")=="contracted" else 1, key=f"{prefix}_type")
+                    new_assignee = st.text_input("Assignee (email)", value=ed_task.get("assignee",""), key=f"{prefix}_assignee")
+                    new_status = st.selectbox("Status", ["open","complete"], index=0 if ed_task.get("status","open")=="open" else 1, key=f"{prefix}_status")
+                    submitted = st.form_submit_button("Save Changes")
+                    return submitted, new_desc, new_specs, new_qty, new_type, new_assignee, new_status
+
+                if hasattr(st, "experimental_dialog"):
+                    @st.experimental_dialog("Edit Task")
+                    def _edit_dialog():
+                        with st.form("edit_task_form"):
+                            ok, d, s, q, ty, asg, stt = edit_form("et")
+                        if ok:
+                            update_task(pid, edit_id, description=d, specifications=s, quantity=int(q), type=ty, assignee=asg, status=stt)
+                            st.session_state["edit_task_id"] = None
+                            toast("Task updated.", "success"); st.rerun()
+                    _edit_dialog()
+                else:
+                    with st.expander("Edit Task", expanded=True):
+                        with st.form("edit_task_form_inline"):
+                            ok, d, s, q, ty, asg, stt = edit_form("et2")
+                        if ok:
+                            update_task(pid, edit_id, description=d, specifications=s, quantity=int(q), type=ty, assignee=asg, status=stt)
+                            st.session_state["edit_task_id"] = None
+                            toast("Task updated.", "success"); st.experimental_rerun()
+
+        # Bulk actions
+        st.markdown("#### Bulk Actions")
+        b1, b2, b3 = st.columns([1,1,1])
+        with b1:
+            if can_edit and st.button("Mark Complete", disabled=not sel_ids, key=f"bulk_complete_{pid}"):
+                for tid in sel_ids: update_task(pid, tid, status="complete")
+                toast("Selected tasks marked complete.", "success"); st.rerun()
+        with b2:
+            assign_to = st.text_input("Assign to (email)", key=f"bulk_assign_to_{pid}")
+            if can_edit and st.button("Assign", disabled=not sel_ids or not assign_to, key=f"bulk_assign_{pid}"):
+                for tid in sel_ids: update_task(pid, tid, assignee=assign_to)
+                toast("Selected tasks assigned.", "success"); st.rerun()
+        with b3:
+            if can_edit and st.button("Delete Selected", disabled=not sel_ids, key=f"bulk_delete_{pid}"):
+                delete_tasks(pid, sel_ids); toast("Selected tasks deleted.", "success"); st.rerun()
+
+        st.markdown("---")
+        st.markdown("### Assets (select for export)")
+        for cat, items in st.session_state["assets"][pid].items():
+            st.markdown(f"**{cat}**")
+            for a in items:
+                left, right = st.columns([0.9, 0.1])
+                with left:
+                    key = f"chk_{pid}_{slug(cat)}_{slug(a['name'])}"
+                    cur = st.session_state["asset_sel"][pid][cat].get(a["name"], False)
+                    checked = st.checkbox(a["name"], value=cur, key=key)
+                    st.session_state["asset_sel"][pid][cat][a["name"]] = checked
+                with right:
+                    st.markdown(f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>", unsafe_allow_html=True)
+
+    # FILES
+    with tabs[2]:
+        st.info("Files (dummy): integrate S3/Drive later.")
+        upl = st.file_uploader("Upload asset", type=["png","jpg","jpeg","pdf","pptx","docx"], key=f"files_{pid}")
+        if upl and st.button("Save file", key=f"filesave_{pid}"):
+            Path("uploads").mkdir(exist_ok=True)
+            with open(Path("uploads")/upl.name, "wb") as f: f.write(upl.getbuffer())
+            toast("File saved (local demo).", "success")
+
+    # CALENDAR
+    with tabs[3]:
+        st.info("Calendar (dummy): game days, activations, deadlines.")
+
+    # SOCIAL
+    with tabs[4]:
+        st.info("Social (dummy): planned & delivered posts + metrics.")
+
+    # PRESENTATIONS
+    with tabs[5]:
+        st.info("Presentations (dummy): links to DigiDeck/PowerPoints.")
+
+    # DATA
+    with tabs[6]:
+        st.info("Data (dummy): Tableau/QBR/engagement KPIs.")
+        if TableauClient:
+            st.caption("Tableau integration stub here.")
 
 def render_partnerships():
-    # If a partner is chosen (from sidebar or deep link), show its brand page
     if current_partner:
         partner, scope = _partner_by_id(current_partner)
         if not partner:
             st.error("Partner not found."); return
-        pid = current_partner
-        _ensure_partner_state(pid)
-
-        st.subheader(f"{partner['name']} — {scope.title()} Partnership")
-
-        # Horizontal sub-tabs (no URL sync inside tab bodies to avoid loops)
-        tab_labels = ["overview","tasks","files","calendar","social","presentations","data"]
-        tabs = st.tabs(tab_labels)
-
-        # --- OVERVIEW ---
-        with tabs[0]:
-            st.markdown("**Assets in contract (by category)**")
-            cats = PARTNER_ASSETS.get(pid, {})
-            if cats:
-                for cat, items in cats.items():
-                    with st.expander(cat, expanded=False):
-                        for a in items:
-                            st.write(f"• {a['name']}  · Season {a.get('season', CURRENT_SEASON)}")
-            else:
-                st.caption("No assets listed yet.")
-            if st.button("← Back to all partnerships"):
-                set_route(page="Partnerships", scope=scope, partner=None, section=None)
-
-        # --- TASKS ---
-        with tabs[1]:
-            st.markdown("### Tasks")
-
-            # Top action row: + New Task | Export | Select All
-            btn_col1, btn_col2, btn_col3 = st.columns([1,1,1])
-            with btn_col1:
-                new_task_clicked = st.button("+ New Task", use_container_width=True)
-            with btn_col2:
-                export_clicked = st.button("Export", use_container_width=True)
-            with btn_col3:
-                select_all_clicked = st.button("Select All", use_container_width=True)
-
-            if select_all_clicked:
-                _select_all_assets(pid, value=True)  # button already triggers a rerun
-
-            if export_clicked:
-                csv_bytes = _export_assets_csv(pid)
-                st.download_button(
-                    "Download CSV",
-                    data=csv_bytes,
-                    file_name=f"{partner['name']}_assets_{CURRENT_SEASON}.csv",
-                    mime="text/csv",
-                )
-
-            # New Task dialog (modal if available, else inline)
-            if new_task_clicked:
-                st.session_state["show_new_task_modal"] = True
-
-            if st.session_state.get("show_new_task_modal"):
-                if hasattr(st, "experimental_dialog"):
-                    @st.experimental_dialog("Create New Task")
-                    def _new_task_dialog():
-                        cats = PARTNER_ASSETS.get(pid, {})
-                        all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
-                        with st.form("new_task_form"):
-                            asset_pick = st.selectbox("Asset", all_assets)
-                            desc  = st.text_area("Task description")
-                            specs = st.text_area("Specifications / production notes")
-                            qty   = st.number_input("Quantity", min_value=1, step=1, value=1)
-                            classification = st.selectbox("Type", ["contracted","value added"])
-                            submitted = st.form_submit_button("Save Task")
-                        if submitted:
-                            asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
-                            _create_task(pid, asset_name, desc, specs, int(qty), classification)
-                            st.session_state["show_new_task_modal"] = False
-                            st.rerun()
-                    _new_task_dialog()
-                else:
-                    with st.expander("Create New Task", expanded=True):
-                        cats = PARTNER_ASSETS.get(pid, {})
-                        all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
-                        with st.form("new_task_form_inline"):
-                            asset_pick = st.selectbox("Asset", all_assets, key="nt_asset")
-                            desc  = st.text_area("Task description", key="nt_desc")
-                            specs = st.text_area("Specifications / production notes", key="nt_specs")
-                            qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key="nt_qty")
-                            classification = st.selectbox("Type", ["contracted","value added"], key="nt_type")
-                            submitted = st.form_submit_button("Save Task")
-                        if submitted:
-                            asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
-                            _create_task(pid, asset_name, desc, specs, int(qty), classification)
-                            st.session_state["show_new_task_modal"] = False
-                            st.rerun()
-
-            # Show tasks table (simple)
-            existing = st.session_state["tasks"].get(pid, [])
-            if existing:
-                st.markdown("#### Existing Tasks")
-                df = pd.DataFrame(existing)
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No tasks yet.")
-
-            st.markdown("---")
-            st.markdown("### Assets (select to include in tasks/export)")
-            # Render asset sections with checkboxes and season at right
-            cats = PARTNER_ASSETS.get(pid, {})
-            for cat, items in cats.items():
-                st.markdown(f"**{cat}**")
-                for a in items:
-                    left, right = st.columns([0.9, 0.1])
-                    with left:
-                        checked = st.checkbox(
-                            a["name"],
-                            value=st.session_state["asset_sel"][pid][cat].get(a["name"], False),
-                            key=f"chk_{pid}_{cat}_{a['name']}",
-                        )
-                        st.session_state["asset_sel"][pid][cat][a["name"]] = checked
-                    with right:
-                        st.markdown(
-                            f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>",
-                            unsafe_allow_html=True,
-                        )
-
-        # --- FILES ---
-        with tabs[2]:
-            st.info("Files (dummy): show S3/Qdrant/Drive links here.")
-
-        # --- CALENDAR ---
-        with tabs[3]:
-            st.info("Calendar (dummy): game days, activations, deadlines.")
-
-        # --- SOCIAL ---
-        with tabs[4]:
-            st.info("Social (dummy): planned & delivered posts + metrics.")
-
-        # --- PRESENTATIONS ---
-        with tabs[5]:
-            st.info("Presentations (dummy): links to DigiDeck/PowerPoints.")
-
-        # --- DATA ---
-        with tabs[6]:
-            st.info("Data (dummy): Tableau/QBR/engagement KPIs.")
+        _brand_tabs(current_partner, partner["name"], scope)
         return
 
-    # No partner selected — grid of buttons for Active/Prospective
     st.subheader("Active Partnerships")
     cols = st.columns(3)
     for i, p in enumerate(PARTNERS["active"]):
@@ -446,20 +660,28 @@ def render_partnerships():
             if st.button(p["name"], key=f"pros_{p['id']}"):
                 set_route(page="Partnerships", scope="prospective", partner=p["id"], section="overview")
 
-# ------------------------
-# Temporary placeholders for other pages (avoid NameError)
-# ------------------------
 def render_prospecting():
     st.subheader("Prospecting")
-    st.info("Prospecting page (coming soon).")
+    st.info("Prospecting page (coming soon). Add SponsorUnited search, etc.")
 
 def render_selling():
     st.subheader("Selling")
-    st.info("Selling page (coming soon).")
+    st.info("Selling page (coming soon). Add proposal gen + DigiDeck smart links.")
 
 def render_reports():
     st.subheader("Reports")
-    st.info("Reports (Proof-of-Performance) page (coming soon).")
+    st.caption("Quick POP export (CSV + images zip)")
+    partner = st.text_input("Partner", "Acme Beverages", key="act_partner")
+    title   = st.text_input("Activation Title", "Opening Night LED", key="act_title")
+    kpi     = st.text_input("KPI (e.g., Impressions)", "1.2M", key="act_kpi")
+    media   = st.file_uploader("Upload photo/screenshot(s)", type=["png","jpg","jpeg"], accept_multiple_files=True, key="act_media")
+    notes   = st.text_area("Notes", "", key="act_notes")
+    if st.button("Export POP"):
+        # Build CSV in memory
+        rows = [{"partner": partner, "title": title, "kpi": kpi, "notes": notes, "filename": m.name if media else ""} for m in (media or [None])]
+        csv_bytes = pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+        st.download_button("Download POP CSV", data=csv_bytes, file_name=f"POP_{slug(partner)}.csv", mime="text/csv")
+        # Future: build a zip with images + CSV
 
 def render_users():
     st.subheader("Users")
@@ -471,7 +693,7 @@ def render_presentations():
 
 def render_files():
     st.subheader("Files")
-    st.info("Central file space (S3/Drive) (coming soon).")
+    st.info("Central file space (S3/Drive later).")
 
 def render_contracts():
     st.subheader("Contracts & Terms — Q&A")
@@ -483,8 +705,35 @@ def render_data():
 
 def render_settings():
     st.subheader("Settings")
-    st.caption("Provider selection will go here.")
-    st.selectbox("Vector DB provider", ["pinecone","qdrant","chroma"], index=0)
+    st.caption("Theme and asset catalogs.")
+    # Theme already handled in sidebar
+
+    st.markdown("#### Asset Catalogs")
+    scope = st.selectbox("Scope", ["active","prospective"], index=0)
+    names = [p["name"] for p in PARTNERS[scope]]
+    ids   = [p["id"]   for p in PARTNERS[scope]]
+    if not names:
+        st.info("No partners in this scope.")
+        return
+    pick = st.selectbox("Choose partner", names)
+    pid  = ids[names.index(pick)]
+
+    # Load so we can show/download
+    load_assets_for(pid)
+    # Download current catalog
+    cat_json = json.dumps(st.session_state["assets"][pid], ensure_ascii=False, indent=2)
+    st.download_button("Download Catalog (JSON)", data=cat_json.encode("utf-8"),
+                       file_name=f"assets_{pid}.json", mime="application/json")
+    # Upload replacement
+    up = st.file_uploader("Replace Catalog (JSON)", type=["json"], key=f"assets_up_{pid}")
+    if up and st.button("Upload & Replace", key=f"assets_replace_{pid}"):
+        try:
+            data = json.loads(up.read().decode("utf-8"))
+            st.session_state["assets"][pid] = data
+            save_assets(pid)
+            toast("Catalog updated.", "success"); st.rerun()
+        except Exception as e:
+            st.error(f"Invalid JSON: {e}")
 
 # ------------------------
 # Router
@@ -499,4 +748,4 @@ elif current_page == "Presentations":  render_presentations()
 elif current_page == "Files":          render_files()
 elif current_page == "Contracts":      render_contracts()
 elif current_page == "Data":           render_data()
-else:                                  render_settings()
+else:                                   render_settings()
