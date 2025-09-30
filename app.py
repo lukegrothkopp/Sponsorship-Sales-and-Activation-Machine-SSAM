@@ -49,21 +49,48 @@ st.set_page_config(
     layout="wide",
 )
 
-# Runtime theme toggle (simple CSS injection)
 def apply_theme():
     theme = st.session_state.get("ui_theme", "dark")
+    ACCENT = "#16A34A"  # green
+    TAB = ACCENT
+
     if theme == "dark":
-        st.markdown("""
+        st.markdown(f"""
         <style>
-        .stApp { background:#0E1117; color:#FAFAFA; }
-        section[data-testid="stSidebar"] { background:#161A23; }
-        div[role="tablist"] button[aria-selected="true"] { border-bottom:2px solid #E54D2E; }
-        .stButton>button{ background:#E54D2E; color:#0E1117; border:0; }
-        .stButton>button:hover{ filter:brightness(1.1); }
+        .stApp {{ background:#0E1117; color:#FAFAFA; }}
+        section[data-testid="stSidebar"] {{ background:#161A23; }}
+        div[role="tablist"] button[aria-selected="true"] {{ border-bottom:2px solid {TAB}; }}
+
+        /* Make all buttons green */
+        .stButton>button,
+        .stDownloadButton>button,
+        .stFormSubmitButton>button {{
+            background:{ACCENT}; color:#0E1117; border:0;
+        }}
+        .stButton>button:hover,
+        .stDownloadButton>button:hover,
+        .stFormSubmitButton>button:hover {{
+            filter:brightness(1.05);
+        }}
         </style>
         """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <style>
+        div[role="tablist"] button[aria-selected="true"] {{ border-bottom:2px solid {TAB}; }}
 
-apply_theme()
+        .stButton>button,
+        .stDownloadButton>button,
+        .stFormSubmitButton>button {{
+            background:{ACCENT}; color:white; border:0;
+        }}
+        .stButton>button:hover,
+        .stDownloadButton>button:hover,
+        .stFormSubmitButton>button:hover {{
+            filter:brightness(0.95);
+        }}
+        </style>
+        """, unsafe_allow_html=True)
 
 # ------------------------
 # Constants & data model
