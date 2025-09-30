@@ -1,15 +1,19 @@
 import os
 from pathlib import Path
-import streamlit as st
-from dotenv import load_dotenv
+from datetime import datetime
 import io
 import pandas as pd
-from datetime import datetime
+import streamlit as st
+from dotenv import load_dotenv
 
+# Optional: if you rely on these elsewhere in your project, keep imports.
+# If not, you can comment them out to avoid import errors while iterating.
 from services.providers import SponsorUnitedClient, DigiDeckClient, SalesforceClient, DynamicsClient, TableauClient
 from services.reasoning import propose_for_prospect, TEAM_ASSETS
 from services.storage import build_contract_store
 from services.s3store import s3_enabled, upload_bytes, presigned_url
+
+load_dotenv()
 
 ASSETS = Path(__file__).parent / "assets"
 FAVICON = ASSETS / "favicon.png"        # tab icon
@@ -158,46 +162,37 @@ def _export_assets_csv(pid: str) -> bytes:
 # ------------------------
 # Query params helpers (modern API, dict-like)
 # ------------------------
-# st.query_params behaves like a mutable dict[str, str]
-
 def set_route(page=None, scope=None, partner=None, section=None, replace=False):
+    """Update query params; rerun only if something actually changed."""
     qp = st.query_params  # dict-like proxy
+    changed = False
 
-    # Optionally clear everything first
     if replace:
         for k in list(qp.keys()):
-            try:
-                del qp[k]
-            except KeyError:
-                pass
+            del qp[k]
+        changed = True
 
-    # Set / update keys
-    if page is not None:
-        qp["page"] = page
-    if scope is not None:
-        qp["scope"] = scope
+    if page is not None and qp.get("page") != page:
+        qp["page"] = page; changed = True
+    if scope is not None and qp.get("scope") != scope:
+        qp["scope"] = scope; changed = True
     if partner is not None:
-        # allow clearing partner by passing None or ""
-        if partner == "" or partner is None:
+        if partner in ("", None):
             if "partner" in qp:
-                del qp["partner"]
-        else:
-            qp["partner"] = partner
-    if section is not None:
-        qp["section"] = section
+                del qp["partner"]; changed = True
+        elif qp.get("partner") != partner:
+            qp["partner"] = partner; changed = True
+    if section is not None and qp.get("section") != section:
+        qp["section"] = section; changed = True
 
-    # Apply route
-    try:
+    if changed:
         st.rerun()
-    except Exception:
-        st.experimental_rerun()  # safe fallback
 
 # Read current route (strings, not lists)
 current_page    = st.query_params.get("page", "Me")
 current_scope   = st.query_params.get("scope", "active")
 current_partner = st.query_params.get("partner", None)
 current_section = st.query_params.get("section", "overview")
-
 
 # ------------------------
 # Sidebar (navigation) — SINGLE source of truth
@@ -217,15 +212,18 @@ with st.sidebar:
 
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
 
-    # Keep URL shareable/reflecting current page
+    # Keep the URL shareable/reflecting current page
     if sel != current_page:
         set_route(page=sel)
 
-    # Partnerships controls
+    # Partnerships controls (dedented; not under the set_route branch)
     if sel == "Partnerships":
         # scope switcher
-        current_scope = st.selectbox("Scope", ["active","prospective"],
-                                     index=0 if current_scope=="active" else 1, key="scope_select")
+        current_scope = st.selectbox(
+            "Scope", ["active","prospective"],
+            index=0 if current_scope=="active" else 1,
+            key="scope_select"
+        )
 
         # brand chooser
         names = [p["name"] for p in PARTNERS[current_scope]]
@@ -233,19 +231,24 @@ with st.sidebar:
         if names:
             pick = st.selectbox("Open brand page", names, key="brand_select")
             pid  = ids[names.index(pick)]
-            open_clicked = st.button("Open ▶")
-            if open_clicked:
+            if st.button("Open ▶"):
                 set_route(page="Partnerships", scope=current_scope, partner=pid, section="overview")
 
         # Secondary, indented child link for the currently-open brand
         if current_partner:
             p, _ = _partner_by_id(current_partner)
             if p:
-                st.markdown(f"<div style='margin-left:10px; color:#bbb;'>↳ <b>{p['name']}</b></div>", unsafe_allow_html=True)
-                # Quick jump buttons for the brand sections (optional)
-                sub = st.selectbox("Navigate brand sections", ["overview","tasks","files","calendar","social","presentations","data"],
-                                   index=["overview","tasks","files","calendar","social","presentations","data"].index(current_section) if current_section in ["overview","tasks","files","calendar","social","presentations","data"] else 0,
-                                   key="brand_section_select")
+                st.markdown(
+                    f"<div style='margin-left:10px; color:#bbb;'>↳ <b>{p['name']}</b></div>",
+                    unsafe_allow_html=True
+                )
+                # Optional quick navigation between brand sections (doesn't auto-rerun)
+                sections = ["overview","tasks","files","calendar","social","presentations","data"]
+                try:
+                    sec_idx = sections.index(current_section)
+                except ValueError:
+                    sec_idx = 0
+                sub = st.selectbox("Navigate brand sections", sections, index=sec_idx, key="brand_section_select")
                 if st.button("Go"):
                     set_route(page="Partnerships", scope=current_scope, partner=current_partner, section=sub)
 
@@ -255,8 +258,6 @@ current_page = sel
 # ------------------------
 # Page renderers
 # ------------------------
-from pathlib import Path
-
 def render_me():
     u = _me()
     st.subheader("My Profile")
@@ -295,22 +296,12 @@ def render_partnerships():
 
         st.subheader(f"{partner['name']} — {scope.title()} Partnership")
 
-        # Horizontal sub-tabs (band navigation) — respect current_section if present
+        # Horizontal sub-tabs (no URL sync inside tab bodies to avoid loops)
         tab_labels = ["overview","tasks","files","calendar","social","presentations","data"]
-        if current_section not in tab_labels:
-            sel_idx = 0
-        else:
-            sel_idx = tab_labels.index(current_section)
-
         tabs = st.tabs(tab_labels)
-        # Small helper to keep URL in sync when user clicks a tab
-        def _sync_tab(section_name: str):
-            if section_name != current_section:
-                set_route(page="Partnerships", scope=scope, partner=pid, section=section_name)
 
         # --- OVERVIEW ---
         with tabs[0]:
-            _sync_tab("overview")
             st.markdown("**Assets in contract (by category)**")
             cats = PARTNER_ASSETS.get(pid, {})
             if cats:
@@ -325,7 +316,6 @@ def render_partnerships():
 
         # --- TASKS ---
         with tabs[1]:
-            _sync_tab("tasks")
             st.markdown("### Tasks")
 
             # Top action row: + New Task | Export | Select All
@@ -338,8 +328,7 @@ def render_partnerships():
                 select_all_clicked = st.button("Select All", use_container_width=True)
 
             if select_all_clicked:
-                _select_all_assets(pid, value=True)
-                st.experimental_rerun()
+                _select_all_assets(pid, value=True)  # button already triggers a rerun
 
             if export_clicked:
                 csv_bytes = _export_assets_csv(pid)
@@ -350,54 +339,45 @@ def render_partnerships():
                     mime="text/csv",
                 )
 
-            # New Task dialog (use experimental_dialog if available, else inline form)
+            # New Task dialog (modal if available, else inline)
             if new_task_clicked:
                 st.session_state["show_new_task_modal"] = True
 
             if st.session_state.get("show_new_task_modal"):
-                # Try modal if available
                 if hasattr(st, "experimental_dialog"):
                     @st.experimental_dialog("Create New Task")
                     def _new_task_dialog():
                         cats = PARTNER_ASSETS.get(pid, {})
-                        all_assets = []
-                        for cat, items in cats.items():
-                            for a in items:
-                                all_assets.append(f"{cat} — {a['name']}")
+                        all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
                         with st.form("new_task_form"):
                             asset_pick = st.selectbox("Asset", all_assets)
-                            desc = st.text_area("Task description")
+                            desc  = st.text_area("Task description")
                             specs = st.text_area("Specifications / production notes")
-                            qty = st.number_input("Quantity", min_value=1, step=1, value=1)
+                            qty   = st.number_input("Quantity", min_value=1, step=1, value=1)
                             classification = st.selectbox("Type", ["contracted","value added"])
                             submitted = st.form_submit_button("Save Task")
                         if submitted:
-                            # split "cat — name"
                             asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
                             _create_task(pid, asset_name, desc, specs, int(qty), classification)
                             st.session_state["show_new_task_modal"] = False
                             st.rerun()
                     _new_task_dialog()
                 else:
-                    # Inline fallback (expander)
                     with st.expander("Create New Task", expanded=True):
                         cats = PARTNER_ASSETS.get(pid, {})
-                        all_assets = []
-                        for cat, items in cats.items():
-                            for a in items:
-                                all_assets.append(f"{cat} — {a['name']}")
+                        all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
                         with st.form("new_task_form_inline"):
                             asset_pick = st.selectbox("Asset", all_assets, key="nt_asset")
-                            desc = st.text_area("Task description", key="nt_desc")
+                            desc  = st.text_area("Task description", key="nt_desc")
                             specs = st.text_area("Specifications / production notes", key="nt_specs")
-                            qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="nt_qty")
+                            qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key="nt_qty")
                             classification = st.selectbox("Type", ["contracted","value added"], key="nt_type")
                             submitted = st.form_submit_button("Save Task")
                         if submitted:
                             asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
                             _create_task(pid, asset_name, desc, specs, int(qty), classification)
                             st.session_state["show_new_task_modal"] = False
-                            st.experimental_rerun()
+                            st.rerun()
 
             # Show tasks table (simple)
             existing = st.session_state["tasks"].get(pid, [])
@@ -424,31 +404,29 @@ def render_partnerships():
                         )
                         st.session_state["asset_sel"][pid][cat][a["name"]] = checked
                     with right:
-                        st.markdown(f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>", unsafe_allow_html=True)
+                        st.markdown(
+                            f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>",
+                            unsafe_allow_html=True,
+                        )
 
         # --- FILES ---
         with tabs[2]:
-            _sync_tab("files")
             st.info("Files (dummy): show S3/Qdrant/Drive links here.")
 
         # --- CALENDAR ---
         with tabs[3]:
-            _sync_tab("calendar")
             st.info("Calendar (dummy): game days, activations, deadlines.")
 
         # --- SOCIAL ---
         with tabs[4]:
-            _sync_tab("social")
             st.info("Social (dummy): planned & delivered posts + metrics.")
 
         # --- PRESENTATIONS ---
         with tabs[5]:
-            _sync_tab("presentations")
             st.info("Presentations (dummy): links to DigiDeck/PowerPoints.")
 
         # --- DATA ---
         with tabs[6]:
-            _sync_tab("data")
             st.info("Data (dummy): Tableau/QBR/engagement KPIs.")
         return
 
@@ -469,7 +447,7 @@ def render_partnerships():
                 set_route(page="Partnerships", scope="prospective", partner=p["id"], section="overview")
 
 # ------------------------
-# Temporary placeholders for pages under construction
+# Temporary placeholders for other pages (avoid NameError)
 # ------------------------
 def render_prospecting():
     st.subheader("Prospecting")
@@ -506,7 +484,6 @@ def render_data():
 def render_settings():
     st.subheader("Settings")
     st.caption("Provider selection will go here.")
-    # Minimal no-op control to avoid unused-page emptiness
     st.selectbox("Vector DB provider", ["pinecone","qdrant","chroma"], index=0)
 
 # ------------------------
