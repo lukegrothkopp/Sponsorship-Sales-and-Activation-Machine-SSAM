@@ -533,7 +533,7 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                         new_task(pid, asset_name, desc, specs, qty, classification, assignee)
                         st.session_state["show_new_task_modal"] = False
                         toast("Task created.", "success")
-                        st.experimental_rerun()
+                        st.rerun()
 
         # Filters
         st.markdown("#### Filters")
@@ -605,7 +605,7 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                         if ok:
                             update_task(pid, edit_id, description=d, specifications=s, quantity=int(q), type=ty, assignee=asg, status=stt)
                             st.session_state["edit_task_id"] = None
-                            toast("Task updated.", "success"); st.experimental_rerun()
+                            toast("Task updated.", "success"); st.rerun()
 
         # Bulk actions
         st.markdown("#### Bulk Actions")
