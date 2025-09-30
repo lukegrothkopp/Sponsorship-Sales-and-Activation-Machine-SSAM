@@ -469,6 +469,47 @@ def render_partnerships():
                 set_route(page="Partnerships", scope="prospective", partner=p["id"], section="overview")
 
 # ------------------------
+# Temporary placeholders for pages under construction
+# ------------------------
+def render_prospecting():
+    st.subheader("Prospecting")
+    st.info("Prospecting page (coming soon).")
+
+def render_selling():
+    st.subheader("Selling")
+    st.info("Selling page (coming soon).")
+
+def render_reports():
+    st.subheader("Reports")
+    st.info("Reports (Proof-of-Performance) page (coming soon).")
+
+def render_users():
+    st.subheader("Users")
+    st.info("User-to-partnership mapping (coming soon).")
+
+def render_presentations():
+    st.subheader("Presentations")
+    st.info("Links to DigiDeck / pitch decks (coming soon).")
+
+def render_files():
+    st.subheader("Files")
+    st.info("Central file space (S3/Drive) (coming soon).")
+
+def render_contracts():
+    st.subheader("Contracts & Terms — Q&A")
+    st.info("Contract Q&A and document search (coming soon).")
+
+def render_data():
+    st.subheader("Data")
+    st.info("3rd-party and internal data dashboards (coming soon).")
+
+def render_settings():
+    st.subheader("Settings")
+    st.caption("Provider selection will go here.")
+    # Minimal no-op control to avoid unused-page emptiness
+    st.selectbox("Vector DB provider", ["pinecone","qdrant","chroma"], index=0)
+
+# ------------------------
 # Router
 # ------------------------
 if   current_page == "Me":             render_me()
