@@ -101,6 +101,61 @@ def _me():
     }
 
 # ------------------------
+# State helpers (tasks & selection)
+# ------------------------
+def _ensure_partner_state(pid: str):
+    """Initialize session state buckets for a partner."""
+    if "tasks" not in st.session_state:
+        st.session_state["tasks"] = {}  # tasks[pid] = list of dicts
+    if pid not in st.session_state["tasks"]:
+        st.session_state["tasks"][pid] = []
+
+    if "asset_sel" not in st.session_state:
+        st.session_state["asset_sel"] = {}  # asset_sel[pid][category][asset_name] = bool
+    if pid not in st.session_state["asset_sel"]:
+        st.session_state["asset_sel"][pid] = {}
+        # initialize all assets unchecked
+        for cat, items in PARTNER_ASSETS.get(pid, {}).items():
+            st.session_state["asset_sel"][pid][cat] = {a["name"]: False for a in items}
+
+def _select_all_assets(pid: str, value: bool = True):
+    """Set all checkboxes True/False for displayed partner."""
+    _ensure_partner_state(pid)
+    for cat in st.session_state["asset_sel"][pid]:
+        for name in st.session_state["asset_sel"][pid][cat]:
+            st.session_state["asset_sel"][pid][cat][name] = value
+
+def _create_task(pid: str, asset: str, desc: str, specs: str, qty: int, classification: str):
+    """Append a new task for a partner."""
+    _ensure_partner_state(pid)
+    st.session_state["tasks"][pid].append({
+        "asset": asset,
+        "description": desc,
+        "specifications": specs,
+        "quantity": qty,
+        "type": classification,  # "contracted" or "value added"
+        "created": datetime.now().isoformat(timespec="seconds"),
+    })
+
+def _export_assets_csv(pid: str) -> bytes:
+    """Export current assets (with selection status) to CSV."""
+    _ensure_partner_state(pid)
+    rows = []
+    cats = PARTNER_ASSETS.get(pid, {})
+    sel = st.session_state["asset_sel"][pid]
+    for cat, items in cats.items():
+        for a in items:
+            rows.append({
+                "partner_id": pid,
+                "category": cat,
+                "asset": a["name"],
+                "season": a.get("season", CURRENT_SEASON),
+                "selected": bool(sel.get(cat, {}).get(a["name"], False)),
+            })
+    df = pd.DataFrame(rows)
+    return df.to_csv(index=False).encode("utf-8")
+
+# ------------------------
 # Query params helpers (modern API, dict-like)
 # ------------------------
 # st.query_params behaves like a mutable dict[str, str]
@@ -426,4 +481,4 @@ elif current_page == "Presentations":  render_presentations()
 elif current_page == "Files":          render_files()
 elif current_page == "Contracts":      render_contracts()
 elif current_page == "Data":           render_data()
-else:                                   render_settings()
+else:                                  render_settings()
