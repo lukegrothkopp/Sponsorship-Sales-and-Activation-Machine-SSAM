@@ -2,6 +2,9 @@ import os
 from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
+import io
+import pandas as pd
+from datetime import datetime
 
 from services.providers import SponsorUnitedClient, DigiDeckClient, SalesforceClient, DynamicsClient, TableauClient
 from services.reasoning import propose_for_prospect, TEAM_ASSETS
@@ -21,20 +24,61 @@ st.set_page_config(
 # ------------------------
 # Simple in-app directory
 # ------------------------
+CURRENT_SEASON = datetime.now().year
+
+# Catalog of assets per partner, organized by category (example data)
+PARTNER_ASSETS = {
+    "coke": {
+        "Digital Media": [
+            {"name": "Social series (player Q&A video)", "season": CURRENT_SEASON},
+            {"name": "Email newsletter (150k)", "season": CURRENT_SEASON},
+            {"name": "In-app trivia game", "season": CURRENT_SEASON},
+        ],
+        "Signage": [
+            {"name": "Branded concession stand", "season": CURRENT_SEASON},
+            {"name": "Concourse sampling footprint", "season": CURRENT_SEASON},
+        ],
+        "Radio": [
+            {"name": "30-second play-by-play", "season": CURRENT_SEASON},
+        ],
+        "Television": [
+            {"name": "Broadcast feature segment", "season": CURRENT_SEASON},
+        ],
+        "LED-Ribbon": [
+            {"name": "Marquee LED ribbon", "season": CURRENT_SEASON},
+            {"name": "In-bowl LED corners", "season": CURRENT_SEASON},
+        ],
+        "IP-Use of Marks": [
+            {"name": "Jersey Patch Partner", "season": CURRENT_SEASON},
+            {"name": "Use of marks in retail", "season": CURRENT_SEASON},
+        ],
+        "Community Engagement": [
+            {"name": "Community clinic", "season": CURRENT_SEASON},
+        ],
+    },
+    "zippay": {
+        "Digital Media": [
+            {"name": "Season launch splash", "season": CURRENT_SEASON},
+        ],
+        "Signage": [
+            {"name": "Concourse sampling footprint", "season": CURRENT_SEASON},
+        ],
+        "Radio": [],
+        "Television": [],
+        "LED-Ribbon": [],
+        "IP-Use of Marks": [],
+        "Community Engagement": [],
+    },
+}
+
 PARTNERS = {
     "active": [
-        {"id": "coke", "name": "Coke", "assets": [
-            "Marquee LED ribbon", "Social series (player Q&A video)",
-            "Email newsletter (150k)", "In-app trivia game", "Community clinic"
-        ]},
-        {"id": "zippay", "name": "ZipPay", "assets": [
-            "Concourse sampling footprint", "Season launch splash",
-            "In-bowl LED corners"
-        ]},
+        {"id": "coke", "name": "Coke"},
+        {"id": "zippay", "name": "ZipPay"},
     ],
     "prospective": [
-        {"id": "acme", "name": "Acme Beverages", "assets": []},
-        {"id": "stellar", "name": "Stellar Fitness", "assets": []},
+        {"id": "acme", "name": "Acme Beverages"},
+        {"id": "stellar", "name": "Stellar Fitness"},
     ],
 }
 
@@ -118,17 +162,37 @@ with st.sidebar:
 
     sel = st.radio("Navigate", PAGES, index=start_idx, key="nav_radio")
 
-    # Keep the URL shareable/reflecting current page
+    # Keep URL shareable/reflecting current page
     if sel != current_page:
-        set_route(page=sel)  # updates ?page=... and reruns
+        set_route(page=sel)
 
+    # Partnerships controls
+    if sel == "Partnerships":
+        # scope switcher
+        current_scope = st.selectbox("Scope", ["active","prospective"],
+                                     index=0 if current_scope=="active" else 1, key="scope_select")
+
+        # brand chooser
         names = [p["name"] for p in PARTNERS[current_scope]]
         ids   = [p["id"]   for p in PARTNERS[current_scope]]
         if names:
             pick = st.selectbox("Open brand page", names, key="brand_select")
             pid  = ids[names.index(pick)]
-            if st.button("Open ▶"):
+            open_clicked = st.button("Open ▶")
+            if open_clicked:
                 set_route(page="Partnerships", scope=current_scope, partner=pid, section="overview")
+
+        # Secondary, indented child link for the currently-open brand
+        if current_partner:
+            p, _ = _partner_by_id(current_partner)
+            if p:
+                st.markdown(f"<div style='margin-left:10px; color:#bbb;'>↳ <b>{p['name']}</b></div>", unsafe_allow_html=True)
+                # Quick jump buttons for the brand sections (optional)
+                sub = st.selectbox("Navigate brand sections", ["overview","tasks","files","calendar","social","presentations","data"],
+                                   index=["overview","tasks","files","calendar","social","presentations","data"].index(current_section) if current_section in ["overview","tasks","files","calendar","social","presentations","data"] else 0,
+                                   key="brand_section_select")
+                if st.button("Go"):
+                    set_route(page="Partnerships", scope=current_scope, partner=current_partner, section=sub)
 
 # Overwrite route with sidebar choice if user changed it
 current_page = sel
@@ -171,35 +235,169 @@ def render_partnerships():
         partner, scope = _partner_by_id(current_partner)
         if not partner:
             st.error("Partner not found."); return
+        pid = current_partner
+        _ensure_partner_state(pid)
+
         st.subheader(f"{partner['name']} — {scope.title()} Partnership")
 
-        # Horizontal sub-tabs (band navigation)
-        tabs = st.tabs(["overview","tasks","files","calendar","social","presentations","data"])
+        # Horizontal sub-tabs (band navigation) — respect current_section if present
+        tab_labels = ["overview","tasks","files","calendar","social","presentations","data"]
+        if current_section not in tab_labels:
+            sel_idx = 0
+        else:
+            sel_idx = tab_labels.index(current_section)
+
+        tabs = st.tabs(tab_labels)
+        # Small helper to keep URL in sync when user clicks a tab
+        def _sync_tab(section_name: str):
+            if section_name != current_section:
+                set_route(page="Partnerships", scope=scope, partner=pid, section=section_name)
+
+        # --- OVERVIEW ---
         with tabs[0]:
-            st.markdown("**Assets in contract**")
-            if partner["assets"]:
-                for a in partner["assets"]:
-                    st.write(f"• {a}")
+            _sync_tab("overview")
+            st.markdown("**Assets in contract (by category)**")
+            cats = PARTNER_ASSETS.get(pid, {})
+            if cats:
+                for cat, items in cats.items():
+                    with st.expander(cat, expanded=False):
+                        for a in items:
+                            st.write(f"• {a['name']}  · Season {a.get('season', CURRENT_SEASON)}")
             else:
                 st.caption("No assets listed yet.")
             if st.button("← Back to all partnerships"):
                 set_route(page="Partnerships", scope=scope, partner=None, section=None)
 
+        # --- TASKS ---
         with tabs[1]:
-            st.info("Tasks (dummy): integrate task service or CRM tasks here.")
+            _sync_tab("tasks")
+            st.markdown("### Tasks")
+
+            # Top action row: + New Task | Export | Select All
+            btn_col1, btn_col2, btn_col3 = st.columns([1,1,1])
+            with btn_col1:
+                new_task_clicked = st.button("+ New Task", use_container_width=True)
+            with btn_col2:
+                export_clicked = st.button("Export", use_container_width=True)
+            with btn_col3:
+                select_all_clicked = st.button("Select All", use_container_width=True)
+
+            if select_all_clicked:
+                _select_all_assets(pid, value=True)
+                st.experimental_rerun()
+
+            if export_clicked:
+                csv_bytes = _export_assets_csv(pid)
+                st.download_button(
+                    "Download CSV",
+                    data=csv_bytes,
+                    file_name=f"{partner['name']}_assets_{CURRENT_SEASON}.csv",
+                    mime="text/csv",
+                )
+
+            # New Task dialog (use experimental_dialog if available, else inline form)
+            if new_task_clicked:
+                st.session_state["show_new_task_modal"] = True
+
+            if st.session_state.get("show_new_task_modal"):
+                # Try modal if available
+                if hasattr(st, "experimental_dialog"):
+                    @st.experimental_dialog("Create New Task")
+                    def _new_task_dialog():
+                        cats = PARTNER_ASSETS.get(pid, {})
+                        all_assets = []
+                        for cat, items in cats.items():
+                            for a in items:
+                                all_assets.append(f"{cat} — {a['name']}")
+                        with st.form("new_task_form"):
+                            asset_pick = st.selectbox("Asset", all_assets)
+                            desc = st.text_area("Task description")
+                            specs = st.text_area("Specifications / production notes")
+                            qty = st.number_input("Quantity", min_value=1, step=1, value=1)
+                            classification = st.selectbox("Type", ["contracted","value added"])
+                            submitted = st.form_submit_button("Save Task")
+                        if submitted:
+                            # split "cat — name"
+                            asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                            _create_task(pid, asset_name, desc, specs, int(qty), classification)
+                            st.session_state["show_new_task_modal"] = False
+                            st.rerun()
+                    _new_task_dialog()
+                else:
+                    # Inline fallback (expander)
+                    with st.expander("Create New Task", expanded=True):
+                        cats = PARTNER_ASSETS.get(pid, {})
+                        all_assets = []
+                        for cat, items in cats.items():
+                            for a in items:
+                                all_assets.append(f"{cat} — {a['name']}")
+                        with st.form("new_task_form_inline"):
+                            asset_pick = st.selectbox("Asset", all_assets, key="nt_asset")
+                            desc = st.text_area("Task description", key="nt_desc")
+                            specs = st.text_area("Specifications / production notes", key="nt_specs")
+                            qty = st.number_input("Quantity", min_value=1, step=1, value=1, key="nt_qty")
+                            classification = st.selectbox("Type", ["contracted","value added"], key="nt_type")
+                            submitted = st.form_submit_button("Save Task")
+                        if submitted:
+                            asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                            _create_task(pid, asset_name, desc, specs, int(qty), classification)
+                            st.session_state["show_new_task_modal"] = False
+                            st.experimental_rerun()
+
+            # Show tasks table (simple)
+            existing = st.session_state["tasks"].get(pid, [])
+            if existing:
+                st.markdown("#### Existing Tasks")
+                df = pd.DataFrame(existing)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No tasks yet.")
+
+            st.markdown("---")
+            st.markdown("### Assets (select to include in tasks/export)")
+            # Render asset sections with checkboxes and season at right
+            cats = PARTNER_ASSETS.get(pid, {})
+            for cat, items in cats.items():
+                st.markdown(f"**{cat}**")
+                for a in items:
+                    left, right = st.columns([0.9, 0.1])
+                    with left:
+                        checked = st.checkbox(
+                            a["name"],
+                            value=st.session_state["asset_sel"][pid][cat].get(a["name"], False),
+                            key=f"chk_{pid}_{cat}_{a['name']}",
+                        )
+                        st.session_state["asset_sel"][pid][cat][a["name"]] = checked
+                    with right:
+                        st.markdown(f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>", unsafe_allow_html=True)
+
+        # --- FILES ---
         with tabs[2]:
+            _sync_tab("files")
             st.info("Files (dummy): show S3/Qdrant/Drive links here.")
+
+        # --- CALENDAR ---
         with tabs[3]:
+            _sync_tab("calendar")
             st.info("Calendar (dummy): game days, activations, deadlines.")
+
+        # --- SOCIAL ---
         with tabs[4]:
+            _sync_tab("social")
             st.info("Social (dummy): planned & delivered posts + metrics.")
+
+        # --- PRESENTATIONS ---
         with tabs[5]:
+            _sync_tab("presentations")
             st.info("Presentations (dummy): links to DigiDeck/PowerPoints.")
+
+        # --- DATA ---
         with tabs[6]:
+            _sync_tab("data")
             st.info("Data (dummy): Tableau/QBR/engagement KPIs.")
         return
 
-    # Otherwise, show Active / Prospective buttons
+    # No partner selected — grid of buttons for Active/Prospective
     st.subheader("Active Partnerships")
     cols = st.columns(3)
     for i, p in enumerate(PARTNERS["active"]):
@@ -214,148 +412,6 @@ def render_partnerships():
         with cols[i % 3]:
             if st.button(p["name"], key=f"pros_{p['id']}"):
                 set_route(page="Partnerships", scope="prospective", partner=p["id"], section="overview")
-
-def render_prospecting():
-    st.subheader("Prospecting (Research & Proposal Building)")
-    q = st.text_input("Search brands (SponsorUnited stub):", "Acme")
-    su = SponsorUnitedClient()
-    if st.button("Search"):
-        brands = su.search_brands(q, limit=6)
-        if brands:
-            for b in brands:
-                st.write(f"- **{b['company']}** — {b.get('industry','')} ({b.get('hq_city','')})")
-        else:
-            st.info("No results (add API key or try another search).")
-
-def render_selling():
-    st.subheader("Selling (Active Pitches)")
-    colA, colB = st.columns(2)
-    with colA:
-        company = st.text_input("Company", "Acme Beverages")
-        industry = st.text_input("Industry", "Beverages")
-        city = st.text_input("HQ City", "Seattle")
-        notes = st.text_area("Notes (segments, goals)")
-        prospect = {"company": company, "industry": industry, "hq_city": city, "notes": notes}
-        if st.button("Generate Insight ▶"):
-            st.session_state["insight"] = propose_for_prospect(prospect)
-    with colB:
-        st.write("**Available team assets**")
-        st.write(TEAM_ASSETS)
-        if "insight" in st.session_state:
-            i = st.session_state["insight"]
-            st.markdown("### Suggested opener"); st.success(i.get("opener",""))
-            st.markdown("### Rationale");       st.write(i.get("rationale",""))
-            st.markdown("### Matching assets");  st.write(i.get("matching_assets",[]))
-            st.markdown("### Next steps");       st.write(i.get("next_steps",[]))
-
-    st.markdown("---")
-    st.subheader("Smart Links (DigiDeck stub)")
-    dd = DigiDeckClient()
-    deck_id = st.text_input("Deck ID", "intro-2025")
-    email   = st.text_input("Prospect Email", "brand@company.com")
-    if st.button("Create Smart Link"):
-        link = dd.create_smart_link(deck_id, email)
-        st.write(link)
-        st.session_state["tracking_id"] = link.get("tracking_id")
-    tracking = st.text_input("Tracking ID", st.session_state.get("tracking_id", ""))
-    if st.button("Get Engagement"):
-        st.write(dd.get_engagement(tracking or "demo"))
-
-def render_reports():
-    st.subheader("Reports (Proof-of-Performance)")
-    partner = st.text_input("Partner", "Acme Beverages", key="act_partner")
-    title   = st.text_input("Activation Title", "Opening Night LED", key="act_title")
-    kpi     = st.text_input("KPI (e.g., Impressions)", "1.2M", key="act_kpi")
-    media   = st.file_uploader("Upload photo/screenshot", type=["png","jpg","jpeg"], key="act_media")
-    notes   = st.text_area("Notes", "", key="act_notes")
-    if st.button("Save Activation"):
-        Path("pop_media").mkdir(exist_ok=True)
-        s3_url = None
-        if media:
-            data = media.getbuffer()
-            local = Path("pop_media")/media.name
-            with open(local,"wb") as f: f.write(data)
-            if s3_enabled():
-                key = f"pop_media/{media.name}"
-                if upload_bytes(key, data, content_type=media.type):
-                    s3_url = presigned_url(key)
-        st.success("Saved activation (demo).")
-        if s3_url: st.markdown(f"S3 link (temporary): [{media.name}]({s3_url})")
-
-def render_users():
-    st.subheader("Users & Partner Access (dummy)")
-    st.info("Map team/brand/agency users to partnerships here (CRM/IdP integration).")
-    st.table({
-        "User": ["You","AE #2","Brand Manager (Coke)","Agency Lead"],
-        "Role": ["AE","AE","Brand","Agency"],
-        "Partnerships": ["Coke, ZipPay", "Acme", "Coke", "ZipPay"]
-    })
-
-def render_presentations():
-    st.subheader("Presentations (dummy)")
-    st.info("List DigiDeck links or uploaded pitch decks here.")
-    st.write("• Coke: 2025 Renewal Pitch (Smart Link)")
-    st.write("• ZipPay: Category Entry Pitch")
-
-def render_files():
-    st.subheader("Files (dummy)")
-    st.info("Central file space for images/copy/creative. Back with S3/Drive later.")
-    upl = st.file_uploader("Upload asset", type=["png","jpg","jpeg","pdf","pptx","docx"])
-    if upl and st.button("Save file"):
-        Path("uploads").mkdir(exist_ok=True)
-        with open(Path("uploads")/upl.name, "wb") as f: f.write(upl.getbuffer())
-        st.success("Saved (local demo).")
-
-def render_contracts():
-    st.subheader("Contracts & Terms — Q&A")
-    uploads = st.file_uploader("Upload executed contract PDFs", type=["pdf"], accept_multiple_files=True, key="contracts")
-    if not uploads: return
-    Path("contracts").mkdir(exist_ok=True)
-    pdf_paths = []
-    for f in uploads:
-        dest = Path("contracts")/f.name
-        data = f.getbuffer()
-        with open(dest,"wb") as out: out.write(data)
-        if s3_enabled():
-            upload_bytes(f"contracts/{f.name}", data, content_type="application/pdf")
-        pdf_paths.append(str(dest))
-    with st.spinner("Indexing contracts..."):
-        retriever, n_chunks, provider_used = build_contract_store(pdf_paths, persist_dir=None)
-    if retriever is None:
-        st.error("No valid PDF pages loaded."); return
-    st.success(f"Indexed {n_chunks} chunks via {provider_used}.")
-    from langchain_openai import ChatOpenAI
-    from langchain.chains import RetrievalQA
-    from langchain.prompts import ChatPromptTemplate
-    prompt = ChatPromptTemplate.from_messages([
-        ("system","Answer using ONLY the contract context. If unknown, say so."),
-        ("human","Q: {question}\nContext:\n{context}\nA:")
-    ])
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    qa = RetrievalQA.from_chain_type(llm=llm, retriever=retriever, chain_type="stuff",
-                                     chain_type_kwargs={"prompt": prompt}, return_source_documents=True)
-    q = st.text_input("Ask about terms (e.g., 'What are the makegoods?')")
-    if st.button("Ask ▶"):
-        res = qa({"query": q})
-        st.write(res["result"])
-        pages = sorted(set(int(s.metadata.get("page",-1))+1 for s in res.get("source_documents",[]) if s.metadata.get("page",-1)>=0))
-        if pages: st.caption("Sources: " + ", ".join(f"p.{p}" for p in pages))
-
-def render_data():
-    st.subheader("Data (dummy)")
-    st.info("3rd-party + user data to support POP (Tableau/Qdrant/etc).")
-    st.metric("Season Impressions", "12.4M")
-    st.metric("Engagements", "342k")
-    st.metric("Promo Redemptions", "18.7k")
-    st.metric("SOV vs Category", "19%")
-
-def render_settings():
-    st.subheader("Settings")
-    st.caption("Provider selection is kept here (no secrets displayed).")
-    provider = st.selectbox("Vector DB provider", ["pinecone","qdrant","chroma"],
-                            index={"pinecone":0,"qdrant":1,"chroma":2}.get(os.getenv("VECTOR_DB_PROVIDER","pinecone"),0))
-    os.environ["VECTOR_DB_PROVIDER"] = provider
-    st.write("Current:", provider)
 
 # ------------------------
 # Router
