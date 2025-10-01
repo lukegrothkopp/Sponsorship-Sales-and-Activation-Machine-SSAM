@@ -161,13 +161,6 @@ def _partner_by_id(pid):
 
 def my_profile():
     return profile()
-    return {
-        "name": st.secrets.get("USER_NAME", "Your Name"),
-        "email": st.secrets.get("USER_EMAIL", "you@example.com"),
-        "role": st.secrets.get("USER_ROLE", "AE"),  # AE, Brand, Agency
-        "partner_ids": [s.strip() for s in st.secrets.get("USER_PARTNERS", "coke").split(",") if s.strip()],
-        "photo": st.secrets.get("USER_PHOTO_URL", None),
-    }
 
 def set_route(page=None, scope=None, partner=None, section=None, replace=False):
     """Update query params; rerun only on real change (prevents loops)."""
