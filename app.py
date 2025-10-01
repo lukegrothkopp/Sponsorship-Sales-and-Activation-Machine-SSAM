@@ -546,6 +546,46 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
     """The brand page with tabs and full Tasks UX."""
     role = profile().get("role", "AE").lower()
     can_edit = role in ("ae", "admin")
+            # --- Create New Task (robust inline UX, no dialogs) ---
+        # Show a disabled button + help if user can't edit
+        if not can_edit:
+            st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}_disabled", disabled=True,
+                      help="Only AE/Admin can create tasks.")
+        else:
+            if st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}"):
+                st.session_state["new_task_for"] = pid
+                st.rerun()
+
+        # Render the inline create form when this partner is active
+        if st.session_state.get("new_task_for") == pid and can_edit:
+            cats = st.session_state["assets"][pid]
+            all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
+
+            with st.form(f"new_task_form_{pid}", clear_on_submit=False):
+                asset_pick = st.selectbox("Asset", all_assets, key=f"nt_asset_{pid}")
+                desc  = st.text_area("Task description", key=f"nt_desc_{pid}")
+                specs = st.text_area("Specifications / production notes", key=f"nt_specs_{pid}")
+                qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key=f"nt_qty_{pid}")
+                classification = st.selectbox("Type", ["contracted","value added"], key=f"nt_type_{pid}")
+                assignee = st.text_input("Assign to (email)", value=profile().get("email",""), key=f"nt_asg_{pid}")
+
+                colA, colB = st.columns([1,1])
+                with colA:
+                    save_clicked = st.form_submit_button("Save Task")
+                with colB:
+                    cancel_clicked = st.form_submit_button("Cancel")
+
+            if save_clicked:
+                asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                new_task(pid, asset_name, desc, specs, int(qty), classification, assignee)
+                st.session_state.pop("new_task_for", None)
+                toast("Task created.", "success")
+                st.rerun()
+
+            if cancel_clicked:
+                st.session_state.pop("new_task_for", None)
+                st.rerun()
+
     load_assets_for(pid)
     ensure_partner_state(pid)
 
