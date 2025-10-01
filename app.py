@@ -543,49 +543,11 @@ def render_me():
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 def _brand_tabs(pid: str, partner_name: str, scope: str):
-    """The brand page with tabs and full Tasks UX."""
+    """Brand page with tabs and a robust inline Tasks UX."""
     role = profile().get("role", "AE").lower()
     can_edit = role in ("ae", "admin")
-            # --- Create New Task (robust inline UX, no dialogs) ---
-    # Show a disabled button + help if user can't edit
-    if not can_edit:
-        st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}_disabled", disabled=True,
-                      help="Only AE/Admin can create tasks.")
-    else:
-        if st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}"):
-            st.session_state["new_task_for"] = pid
-            st.rerun()
 
-    # Render the inline create form when this partner is active
-    if st.session_state.get("new_task_for") == pid and can_edit:
-        cats = st.session_state["assets"][pid]
-        all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
-
-        with st.form(f"new_task_form_{pid}", clear_on_submit=False):
-            asset_pick = st.selectbox("Asset", all_assets, key=f"nt_asset_{pid}")
-            desc  = st.text_area("Task description", key=f"nt_desc_{pid}")
-            specs = st.text_area("Specifications / production notes", key=f"nt_specs_{pid}")
-            qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key=f"nt_qty_{pid}")
-            classification = st.selectbox("Type", ["contracted","value added"], key=f"nt_type_{pid}")
-            assignee = st.text_input("Assign to (email)", value=profile().get("email",""), key=f"nt_asg_{pid}")
-
-            colA, colB = st.columns([1,1])
-            with colA:
-                save_clicked = st.form_submit_button("Save Task")
-            with colB:
-                    cancel_clicked = st.form_submit_button("Cancel")
-
-            if save_clicked:
-                asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
-                new_task(pid, asset_name, desc, specs, int(qty), classification, assignee)
-                st.session_state.pop("new_task_for", None)
-                toast("Task created.", "success")
-                st.rerun()
-
-            if cancel_clicked:
-                st.session_state.pop("new_task_for", None)
-                st.rerun()
-
+    # Ensure state ready before UI uses it
     load_assets_for(pid)
     ensure_partner_state(pid)
 
@@ -593,7 +555,8 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
     breadcrumb("Partnerships", partner_name, current_section.title())
 
     tabs = st.tabs(["overview","tasks","files","calendar","social","presentations","data"])
-    # OVERVIEW
+
+    # ---------------- OVERVIEW ----------------
     with tabs[0]:
         st.markdown("**Assets in contract (by category)**")
         cats = st.session_state["assets"][pid]
@@ -607,23 +570,26 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
         if st.button("← Back to all partnerships"):
             set_route(page="Partnerships", scope=scope, partner=None, section=None)
 
-    # TASKS
+    # ---------------- TASKS ----------------
     with tabs[1]:
         st.markdown("### Tasks")
 
-        # Top actions
+        # Top action row
         c1, c2, c3, c4 = st.columns([1,1,1,1])
         with c1:
-            create_clicked = st.button("+ New Task", use_container_width=True, key=f"newtask_{pid}")
+            create_clicked = st.button(
+                "+ New Task",
+                use_container_width=True,
+                key=f"btn_newtask_{pid}",
+                disabled=not can_edit,
+                help=None if can_edit else "Only AE/Admin can create tasks."
+            )
         with c2:
-            export_csv_clicked = st.button("Export Assets (CSV)", use_container_width=True, key=f"expassets_{pid}")
+            export_csv_clicked = st.button("Export Assets (CSV)", use_container_width=True, key=f"btn_expassets_{pid}")
         with c3:
-            export_xlsx_clicked = st.button("Export Tasks (Excel)", use_container_width=True, key=f"exptasks_{pid}")
+            export_xlsx_clicked = st.button("Export Tasks (Excel)", use_container_width=True, key=f"btn_exptasks_{pid}")
         with c4:
-            select_all_clicked = st.button("Select All Assets", use_container_width=True, key=f"selall_{pid}")
-
-        role = profile().get("role", "AE").lower()
-        can_edit = role in ("ae", "admin")
+            select_all_clicked = st.button("Select All Assets", use_container_width=True, key=f"btn_selall_{pid}")
 
         # Bulk select assets
         if select_all_clicked:
@@ -641,7 +607,7 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                                mime="text/csv",
                                key=f"dl_assets_{pid}")
 
-        # Export tasks Excel (if available)
+        # Export tasks Excel (or CSV fallback)
         if export_xlsx_clicked:
             xbytes = export_tasks_xlsx(pid)
             if xbytes:
@@ -659,48 +625,40 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                                    mime="text/csv",
                                    key=f"dl_tasks_csv_{pid}")
 
-        # Create New Task
+        # ----- Inline New Task form (no dialogs, stable across Streamlit versions)
         if create_clicked and can_edit:
-            st.session_state["show_new_task_modal"] = True
+            st.session_state[f"show_new_task_form_{pid}"] = True
 
-        if st.session_state.get("show_new_task_modal", False) and can_edit:
+        if st.session_state.get(f"show_new_task_form_{pid}") and can_edit:
             cats = st.session_state["assets"][pid]
             all_assets = [f"{cat} — {a['name']}" for cat, items in cats.items() for a in items]
 
-            def task_form(form_key: str):
-                asset_pick = st.selectbox("Asset", all_assets, key=f"{form_key}_asset")
-                desc  = st.text_area("Task description", key=f"{form_key}_desc")
-                specs = st.text_area("Specifications / production notes", key=f"{form_key}_specs")
-                qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key=f"{form_key}_qty")
-                classification = st.selectbox("Type", ["contracted","value added"], key=f"{form_key}_type")
-                assignee = st.text_input("Assign to (email)", key=f"{form_key}_assignee")
-                submitted = st.form_submit_button("Save Task")
-                return submitted, asset_pick, desc, specs, qty, classification, assignee
+            with st.form(f"form_new_task_{pid}", clear_on_submit=False):
+                asset_pick = st.selectbox("Asset", all_assets, key=f"nt_asset_{pid}")
+                desc  = st.text_area("Task description", key=f"nt_desc_{pid}")
+                specs = st.text_area("Specifications / production notes", key=f"nt_specs_{pid}")
+                qty   = st.number_input("Quantity", min_value=1, step=1, value=1, key=f"nt_qty_{pid}")
+                classification = st.selectbox("Type", ["contracted","value added"], key=f"nt_type_{pid}")
+                assignee = st.text_input("Assign to (email)", value=profile().get("email",""), key=f"nt_asg_{pid}")
 
-            if hasattr(st, "experimental_dialog"):
-                @st.experimental_dialog("Create New Task")
-                def _new_task_dialog():
-                    with st.form("new_task_form"):
-                        submitted, asset_pick, desc, specs, qty, classification, assignee = task_form("nt")
-                    if submitted:
-                        asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
-                        new_task(pid, asset_name, desc, specs, qty, classification, assignee)
-                        st.session_state["show_new_task_modal"] = False
-                        toast("Task created.", "success")
-                        st.rerun()
-                _new_task_dialog()
-            else:
-                with st.expander("Create New Task", expanded=True):
-                    with st.form("new_task_form_inline"):
-                        submitted, asset_pick, desc, specs, qty, classification, assignee = task_form("nt2")
-                    if submitted:
-                        asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
-                        new_task(pid, asset_name, desc, specs, qty, classification, assignee)
-                        st.session_state["show_new_task_modal"] = False
-                        toast("Task created.", "success")
-                        st.rerun()
+                colA, colB = st.columns([1,1])
+                with colA:
+                    save_clicked = st.form_submit_button("Save Task")
+                with colB:
+                    cancel_clicked = st.form_submit_button("Cancel")
 
-        # Filters
+            if save_clicked:
+                asset_name = asset_pick.split(" — ", 1)[1] if " — " in asset_pick else asset_pick
+                new_task(pid, asset_name, desc, specs, int(qty), classification, assignee)
+                st.session_state.pop(f"show_new_task_form_{pid}", None)
+                toast("Task created.", "success")
+                st.rerun()
+
+            if cancel_clicked:
+                st.session_state.pop(f"show_new_task_form_{pid}", None)
+                st.rerun()
+
+        # ---- Filters
         st.markdown("#### Filters")
         cats = st.session_state["assets"][pid]
         all_categories = list(cats.keys())
@@ -708,17 +666,14 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
         with fcol1:
             pick_cats = st.multiselect("Category", all_categories, default=all_categories, key=f"fcat_{pid}")
         with fcol2:
-            pick_types = st.multiselect("Type", ["contracted","value added"], default=["contracted","value added"],
-                                        key=f"ftype_{pid}")
+            pick_types = st.multiselect("Type", ["contracted","value added"], default=["contracted","value added"], key=f"ftype_{pid}")
         with fcol3:
             seasons = sorted({a.get("season", CURRENT_SEASON) for items in cats.values() for a in items})
             pick_season = st.selectbox("Season", seasons, index=len(seasons)-1, key=f"fseason_{pid}")
 
-        # Tasks list with selection + per-row actions
+        # ---- Task list
         st.markdown("#### Task List")
-        tasks = [t for t in st.session_state["tasks"][pid]
-                 if t["type"] in pick_types]
-        # Per-row selection
+        tasks = [t for t in st.session_state["tasks"][pid] if t["type"] in pick_types]
         sel_ids = []
         for t in tasks:
             row = st.container(border=True)
@@ -738,41 +693,29 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                     if can_edit and st.button("Delete", key=f"del_{pid}_{t['id']}"):
                         delete_tasks(pid, [t["id"]]); toast("Task deleted.", "success"); st.rerun()
 
-        # Edit dialog for one task
+        # ---- Edit existing task (inline/expander fallback)
         edit_id = st.session_state.get("edit_task_id")
         if can_edit and edit_id:
             ed_task = next((x for x in st.session_state["tasks"][pid] if x["id"] == edit_id), None)
             if ed_task:
-                def edit_form(prefix="et"):
-                    new_desc  = st.text_area("Task description", value=ed_task.get("description",""), key=f"{prefix}_desc")
-                    new_specs = st.text_area("Specifications / production notes", value=ed_task.get("specifications",""), key=f"{prefix}_specs")
-                    new_qty   = st.number_input("Quantity", min_value=1, step=1, value=int(ed_task.get("quantity",1)), key=f"{prefix}_qty")
-                    new_type  = st.selectbox("Type", ["contracted","value added"], index=0 if ed_task.get("type")=="contracted" else 1, key=f"{prefix}_type")
-                    new_assignee = st.text_input("Assignee (email)", value=ed_task.get("assignee",""), key=f"{prefix}_assignee")
-                    new_status = st.selectbox("Status", ["open","complete"], index=0 if ed_task.get("status","open")=="open" else 1, key=f"{prefix}_status")
-                    submitted = st.form_submit_button("Save Changes")
-                    return submitted, new_desc, new_specs, new_qty, new_type, new_assignee, new_status
+                with st.expander("Edit Task", expanded=True):
+                    with st.form("edit_task_form_inline"):
+                        new_desc  = st.text_area("Task description", value=ed_task.get("description",""))
+                        new_specs = st.text_area("Specifications / production notes", value=ed_task.get("specifications",""))
+                        new_qty   = st.number_input("Quantity", min_value=1, step=1, value=int(ed_task.get("quantity",1)))
+                        new_type  = st.selectbox("Type", ["contracted","value added"],
+                                                 index=0 if ed_task.get("type")=="contracted" else 1)
+                        new_assignee = st.text_input("Assignee (email)", value=ed_task.get("assignee",""))
+                        new_status = st.selectbox("Status", ["open","complete"],
+                                                  index=0 if ed_task.get("status","open")=="open" else 1)
+                        ok = st.form_submit_button("Save Changes")
+                    if ok:
+                        update_task(pid, edit_id, description=new_desc, specifications=new_specs,
+                                    quantity=int(new_qty), type=new_type, assignee=new_assignee, status=new_status)
+                        st.session_state["edit_task_id"] = None
+                        toast("Task updated.", "success"); st.rerun()
 
-                if hasattr(st, "experimental_dialog"):
-                    @st.experimental_dialog("Edit Task")
-                    def _edit_dialog():
-                        with st.form("edit_task_form"):
-                            ok, d, s, q, ty, asg, stt = edit_form("et")
-                        if ok:
-                            update_task(pid, edit_id, description=d, specifications=s, quantity=int(q), type=ty, assignee=asg, status=stt)
-                            st.session_state["edit_task_id"] = None
-                            toast("Task updated.", "success"); st.rerun()
-                    _edit_dialog()
-                else:
-                    with st.expander("Edit Task", expanded=True):
-                        with st.form("edit_task_form_inline"):
-                            ok, d, s, q, ty, asg, stt = edit_form("et2")
-                        if ok:
-                            update_task(pid, edit_id, description=d, specifications=s, quantity=int(q), type=ty, assignee=asg, status=stt)
-                            st.session_state["edit_task_id"] = None
-                            toast("Task updated.", "success"); st.rerun()
-
-        # Bulk actions
+        # ---- Bulk actions
         st.markdown("#### Bulk Actions")
         b1, b2, b3 = st.columns([1,1,1])
         with b1:
@@ -802,7 +745,7 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
                 with right:
                     st.markdown(f"<div style='text-align:right;'>Season {a.get('season', CURRENT_SEASON)}</div>", unsafe_allow_html=True)
 
-    # FILES
+    # ---------------- FILES ----------------
     with tabs[2]:
         st.info("Files (dummy): integrate S3/Drive later.")
         upl = st.file_uploader("Upload asset", type=["png","jpg","jpeg","pdf","pptx","docx"], key=f"files_{pid}")
@@ -811,19 +754,19 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
             with open(Path("uploads")/upl.name, "wb") as f: f.write(upl.getbuffer())
             toast("File saved (local demo).", "success")
 
-    # CALENDAR
+    # ---------------- CALENDAR ----------------
     with tabs[3]:
         st.info("Calendar (dummy): game days, activations, deadlines.")
 
-    # SOCIAL
+    # ---------------- SOCIAL ----------------
     with tabs[4]:
         st.info("Social (dummy): planned & delivered posts + metrics.")
 
-    # PRESENTATIONS
+    # ---------------- PRESENTATIONS ----------------
     with tabs[5]:
         st.info("Presentations (dummy): links to DigiDeck/PowerPoints.")
 
-    # DATA
+    # ---------------- DATA ----------------
     with tabs[6]:
         st.info("Data (dummy): Tableau/QBR/engagement KPIs.")
         if TableauClient:
