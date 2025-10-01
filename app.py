@@ -160,6 +160,7 @@ def _partner_by_id(pid):
     return None, None
 
 def my_profile():
+    return profile()
     return {
         "name": st.secrets.get("USER_NAME", "Your Name"),
         "email": st.secrets.get("USER_EMAIL", "you@example.com"),
@@ -225,6 +226,50 @@ def load_json(kind: str, pid: str, default):
         except Exception:
             return default
     return default
+
+# ------------------------
+# Profile persistence
+# ------------------------
+PROFILE_LOCAL = DATA_DIR / "profile.json"
+PROFILE_S3 = "ssam/profile/profile.json"
+
+DEFAULT_PROFILE = {
+    "name": st.secrets.get("USER_NAME", "Your Name"),
+    "email": st.secrets.get("USER_EMAIL", "you@example.com"),
+    "role": st.secrets.get("USER_ROLE", "AE"),  # AE, Admin, Brand, Agency
+    "partner_ids": [s.strip() for s in st.secrets.get("USER_PARTNERS", "coke").split(",") if s.strip()],
+    "photo": st.secrets.get("USER_PHOTO_URL", None),
+}
+
+def save_profile(profile: dict):
+    payload = json.dumps(profile, ensure_ascii=False, indent=2).encode("utf-8")
+    PROFILE_LOCAL.write_bytes(payload)
+    if s3_enabled():
+        upload_bytes(PROFILE_S3, payload, content_type="application/json")
+
+def load_profile() -> dict:
+    # Try S3 first
+    if s3_enabled():
+        blob = download_bytes(PROFILE_S3)
+        if blob:
+            try:
+                return json.loads(blob.decode("utf-8"))
+            except Exception:
+                pass
+    # Fallback local
+    if PROFILE_LOCAL.exists():
+        try:
+            return json.loads(PROFILE_LOCAL.read_text(encoding="utf-8"))
+        except Exception:
+            return DEFAULT_PROFILE
+    # Default
+    return DEFAULT_PROFILE
+
+def profile() -> dict:
+    """Cached profile in session_state."""
+    if "profile" not in st.session_state:
+        st.session_state["profile"] = load_profile()
+    return st.session_state["profile"]
 
 # ------------------------
 # Session state buckets
@@ -381,27 +426,112 @@ def toast(msg, kind="info"):
 # Pages
 # ------------------------
 def render_me():
-    u = my_profile()
+    p = profile()
+
     st.subheader("My Profile")
     col1, col2 = st.columns([0.18, 0.82])
     with col1:
-        if u["photo"]: st.image(u["photo"])
-        else:          st.image("https://placehold.co/200x200?text=ME")
+        if p.get("photo"):
+            st.image(p["photo"])
+        else:
+            st.image("https://placehold.co/200x200?text=ME")
     with col2:
-        st.write(f"**Name:** {u['name']}")
-        st.write(f"**Email:** {u['email']}")
-        st.write(f"**Role:** {u['role']}")
+        st.write(f"**Name:** {p['name']}")
+        st.write(f"**Email:** {p['email']}")
+        st.write(f"**Role:** {p['role']}")
+
+    # ---------- Edit Profile ----------
+    with st.expander("Edit profile", expanded=False):
+        # Build partner choices from your PARTNERS dictionary
+        all_partner_ids = []
+        id_to_label = {}
+        for scope in ("active", "prospective"):
+            for item in PARTNERS.get(scope, []):
+                all_partner_ids.append(item["id"])
+                id_to_label[item["id"]] = f"{item['name']} ({scope})"
+
+        default_ids = [pid for pid in p.get("partner_ids", []) if pid in all_partner_ids]
+
+        with st.form("edit_profile_form", clear_on_submit=False):
+            name = st.text_input("Name", value=p.get("name",""))
+            email = st.text_input("Email", value=p.get("email",""))
+            role = st.selectbox("Role", ["AE", "Admin", "Brand", "Agency"],
+                                index=["AE","Admin","Brand","Agency"].index(p.get("role","AE")) if p.get("role","AE") in ["AE","Admin","Brand","Agency"] else 0)
+
+            # show labels in UI; store ids
+            pick_labels = [id_to_label[pid] for pid in default_ids]
+            all_labels = [id_to_label[pid] for pid in all_partner_ids]
+            chosen_labels = st.multiselect("Partners you work with", options=all_labels, default=pick_labels)
+            chosen_ids = []
+            # map back to ids
+            label_to_id = {v:k for k,v in id_to_label.items()}
+            for lab in chosen_labels:
+                if lab in label_to_id:
+                    chosen_ids.append(label_to_id[lab])
+
+            photo_url = st.text_input("Photo URL (optional)", value=p.get("photo","") or "")
+            photo_file = st.file_uploader("Or upload a new photo", type=["png","jpg","jpeg"])
+
+            submitted = st.form_submit_button("Save changes")
+
+        if submitted:
+            # If a photo file is uploaded, save locally (or push to S3)
+            final_photo = photo_url.strip()
+            if photo_file is not None:
+                Path("uploads").mkdir(exist_ok=True)
+                dest = Path("uploads") / f"profile_{slug(name)}_{photo_file.name}"
+                with open(dest, "wb") as f:
+                    f.write(photo_file.getbuffer())
+                final_photo = str(dest)
+                # Optional S3
+                if s3_enabled():
+                    key = f"ssam/photos/{dest.name}"
+                    if upload_bytes(key, photo_file.getbuffer(), content_type=photo_file.type):
+                        s3_url = presigned_url(key)
+                        if s3_url:
+                            final_photo = s3_url
+
+            updated = {
+                "name": name.strip() or p["name"],
+                "email": email.strip() or p["email"],
+                "role": role,
+                "partner_ids": chosen_ids or [],
+                "photo": final_photo or None,
+            }
+            # Persist & refresh session profile
+            save_profile(updated)
+            st.session_state["profile"] = updated
+            st.success("Profile updated.")
+            st.rerun()
 
     st.markdown("---")
     st.subheader("My Partners")
     any_btn = False
-    for pid in u["partner_ids"]:
-        p, scope = _partner_by_id(pid)
-        if not p: continue
+    for pid in p.get("partner_ids", []):
+        pr, scope = _partner_by_id(pid)
+        if not pr:
+            continue
         any_btn = True
-        if st.button(f"Open {p['name']} ▶", key=f"me_open_{pid}"):
+        if st.button(f"Open {pr['name']} ▶", key=f"me_open_{pid}"):
             set_route(page="Partnerships", scope=scope or "active", partner=pid, section="overview")
-    if not any_btn: st.info("No partners assigned yet.")
+    if not any_btn:
+        st.caption("No partners assigned yet.")
+
+    # ---------- My Tasks ----------
+    st.markdown("---")
+    st.subheader("My Tasks")
+    my_email = p.get("email","").lower()
+    rows = []
+    for scope in PARTNERS:
+        for pr in PARTNERS[scope]:
+            pid = pr["id"]; ensure_partner_state(pid)
+            for t in st.session_state["tasks"][pid]:
+                if t.get("assignee","").lower() == my_email and my_email:
+                    rows.append({"partner": pr["name"], **t})
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+    else:
+        st.caption("No tasks assigned to you yet.")
 
     # My Tasks (aggregated)
     st.markdown("---")
@@ -421,6 +551,8 @@ def render_me():
 
 def _brand_tabs(pid: str, partner_name: str, scope: str):
     """The brand page with tabs and full Tasks UX."""
+    role = profile().get("role", "AE").lower()
+    can_edit = role in ("ae", "admin")
     load_assets_for(pid)
     ensure_partner_state(pid)
 
@@ -457,7 +589,7 @@ def _brand_tabs(pid: str, partner_name: str, scope: str):
         with c4:
             select_all_clicked = st.button("Select All Assets", use_container_width=True, key=f"selall_{pid}")
 
-        role = my_profile()["role"].lower()
+        role = profile().get("role", "AE").lower()
         can_edit = role in ("ae", "admin")
 
         # Bulk select assets
