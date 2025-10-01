@@ -528,19 +528,6 @@ def render_me():
 
     # My Tasks (aggregated)
     st.markdown("---")
-    st.subheader("My Tasks")
-    my_ids = []
-    for scope in PARTNERS:
-        for p in PARTNERS[scope]:
-            pid = p["id"]; ensure_partner_state(pid)
-            for t in st.session_state["tasks"][pid]:
-                if t.get("assignee","").lower() == u["email"].lower():
-                    my_ids.append((pid, p["name"], t))
-    if not my_ids:
-        st.caption("No tasks assigned to you yet.")
-    else:
-        rows = [{"partner": name, **t} for (_, name, t) in my_ids]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 def _brand_tabs(pid: str, partner_name: str, scope: str):
     """Brand page with tabs and a robust inline Tasks UX."""
